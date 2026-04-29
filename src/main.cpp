@@ -3,12 +3,24 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <DHTesp.h>
 
-constexpr int OLED_SDA = 21;
-constexpr int OLED_SCL = 22;
-constexpr int BTN_BOOT = 0;     // BOOT button on GPIO0, active LOW
+constexpr int OLED_SDA  = 21;
+constexpr int OLED_SCL  = 22;
+constexpr int OLED2_SDA = 18;
+constexpr int OLED2_SCL = 19;
+constexpr int BTN_BOOT  = 0;    // BOOT button on GPIO0, active LOW
+constexpr int DHT_PIN   = 4;    // DHT11 DATA line
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C oled2(U8G2_R0, /*clock=*/OLED2_SCL,
+                                                   /*data=*/OLED2_SDA, U8X8_PIN_NONE);
+
+// U8g2 _F_ constructors back the framebuffer with a STATIC array shared by all
+// instances of the same display type. With two SSD1306 128x64 instances rendered
+// concurrently from different cores, that shared array races and one display
+// briefly shows the other's content. Give oled2 its own framebuffer.
+static uint8_t oled2Buf[16 * 8 * 8];   // tile_width(16) * 8 * tile_buf_height(8)
 
 constexpr const char *WIFI_SSID = "ARRIS-44F2";
 constexpr const char *WIFI_PASS = "8876A08017ACAD93";
@@ -27,7 +39,7 @@ constexpr int Y_YELLOW   = 11;
 constexpr int Y_BLUE_MID = 46;
 constexpr int Y_BLUE_BOT = 61;
 
-enum Screen { SCREEN_IP, SCREEN_SCAN };
+enum Screen { SCREEN_IP, SCREEN_SCAN, SCREEN_DHT };
 Screen currentScreen = SCREEN_IP;
 
 String currentIp;
@@ -37,37 +49,57 @@ int     scanPage  = 0;
 uint32_t lastScanFlip = 0;
 bool    scanHasData = false;
 
+DHTesp   dht;
+constexpr uint32_t DHT_POLL_MS = 2000;   // DHT11 min sampling period
+uint32_t lastDhtRead = 0;
+float    dhtTemp = NAN;
+float    dhtHum  = NAN;
+bool     dhtOk   = false;
+
+// CPU / RAM stats sampled in loop()
+constexpr uint32_t STATS_WINDOW_MS = 1000;
+uint64_t busyAccumUs    = 0;
+uint32_t statsWindowAt  = 0;
+uint8_t  cpuPct         = 0;
+uint8_t  ramPct         = 0;
+
 // button state
 bool     btnPrev = HIGH;
 uint32_t btnDownAt = 0;
 bool     longFired = false;
 
-static void drawZoneFrames() {
-  display.drawFrame(0, 0, 128, 16);
-  display.drawFrame(0, 18, 128, 46);
+static void drawZoneFrames(U8G2 &d) {
+  d.drawFrame(0, 0, 128, 16);
+  d.drawFrame(0, 18, 128, 46);
 }
 
-static void beginFrame() {
-  display.clearBuffer();
-  drawZoneFrames();
+static void beginFrame(U8G2 &d) {
+  d.clearBuffer();
+  drawZoneFrames(d);
 }
 
-static void drawHeaderYellow(const char *text) {
-  display.setFont(u8g2_font_6x10_tr);
-  int w = display.getStrWidth(text);
-  display.drawStr((128 - w) / 2, Y_YELLOW, text);
+static void drawHeaderYellow(U8G2 &d, const char *text) {
+  d.setFont(u8g2_font_6x10_tr);
+  int w = d.getStrWidth(text);
+  d.drawStr((128 - w) / 2, Y_YELLOW, text);
 }
 
-static void drawCenteredAt(int y, const uint8_t *font, const char *text) {
-  display.setFont(font);
-  int w = display.getStrWidth(text);
-  display.drawStr((128 - w) / 2, y, text);
+static void drawHeaderStats(U8G2 &d) {
+  char buf[24];
+  snprintf(buf, sizeof(buf), "CPU %u%%  RAM %u%%", cpuPct, ramPct);
+  drawHeaderYellow(d, buf);
+}
+
+static void drawCenteredAt(U8G2 &d, int y, const uint8_t *font, const char *text) {
+  d.setFont(font);
+  int w = d.getStrWidth(text);
+  d.drawStr((128 - w) / 2, y, text);
 }
 
 static void drawTwoLine(const char *header, const char *body) {
-  beginFrame();
-  drawHeaderYellow(header);
-  if (body) drawCenteredAt(Y_BLUE_MID, u8g2_font_6x10_tr, body);
+  beginFrame(display);
+  drawHeaderYellow(display, header);
+  if (body) drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, body);
   display.sendBuffer();
 }
 
@@ -124,11 +156,11 @@ static String fetchPublicIp() {
 // ---------- screens ----------
 
 static void renderIp() {
-  beginFrame();
-  drawHeaderYellow("Public IP");
+  beginFrame(display);
+  drawHeaderStats(display);
 
   if (currentIp.length() == 0) {
-    drawCenteredAt(Y_BLUE_MID, u8g2_font_6x10_tr, "fetch failed");
+    drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, "fetch failed");
     display.sendBuffer();
     return;
   }
@@ -148,7 +180,7 @@ static void renderIp() {
     ssid.remove(ssid.length() - 1);
     foot = ssid + ". " + String((int)WiFi.RSSI()) + "dBm";
   }
-  drawCenteredAt(Y_BLUE_BOT, u8g2_font_6x10_tr, foot.c_str());
+  drawCenteredAt(display, Y_BLUE_BOT, u8g2_font_6x10_tr, foot.c_str());
   display.sendBuffer();
 }
 
@@ -158,22 +190,16 @@ static String truncate(const String &s, int maxChars) {
 }
 
 static void renderScan() {
-  beginFrame();
-
-  int totalPages = scanCount > 0
-      ? (scanCount + SCAN_ROWS_PAGE - 1) / SCAN_ROWS_PAGE
-      : 1;
-  String hdr = "WiFi " + String(scanCount) + "  " +
-               String(scanPage + 1) + "/" + String(totalPages);
-  drawHeaderYellow(hdr.c_str());
+  beginFrame(display);
+  drawHeaderStats(display);
 
   if (!scanHasData) {
-    drawCenteredAt(Y_BLUE_MID, u8g2_font_6x10_tr, "Scanning...");
+    drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, "Scanning...");
     display.sendBuffer();
     return;
   }
   if (scanCount == 0) {
-    drawCenteredAt(Y_BLUE_MID, u8g2_font_6x10_tr, "no networks");
+    drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, "no networks");
     display.sendBuffer();
     return;
   }
@@ -219,15 +245,76 @@ static void refreshIp() {
   Serial.printf("Public IP: '%s'\n", currentIp.c_str());
 }
 
+// ---------- DHT ----------
+
+static void readDht() {
+  TempAndHumidity th = dht.getTempAndHumidity();
+  DHTesp::DHT_ERROR_t st = dht.getStatus();
+  lastDhtRead = millis();
+  if (st == DHTesp::ERROR_NONE && !isnan(th.temperature) && !isnan(th.humidity)) {
+    dhtTemp = th.temperature;
+    dhtHum  = th.humidity;
+    dhtOk   = true;
+    Serial.printf("DHT11: %.1f C, %.0f %%\n", dhtTemp, dhtHum);
+  } else {
+    dhtOk = false;
+    Serial.printf("DHT11 read error: %s\n", dht.getStatusString());
+  }
+}
+
+static void renderDhtTo(U8G2 &d) {
+  beginFrame(d);
+  drawHeaderStats(d);
+
+  if (!dhtOk) {
+    drawCenteredAt(d, Y_BLUE_MID, u8g2_font_6x10_tr, "no data");
+    d.sendBuffer();
+    return;
+  }
+
+  char tbuf[16];
+  snprintf(tbuf, sizeof(tbuf), "%.1f\xB0""C", dhtTemp);  // 0xB0 = ° in u8g2 latin-1 fonts
+  d.setFont(u8g2_font_logisoso16_tr);
+  int w = d.getStrWidth(tbuf);
+  d.drawStr(max(0, (128 - w) / 2), Y_BLUE_MID, tbuf);
+
+  char hbuf[16];
+  snprintf(hbuf, sizeof(hbuf), "%.0f %%", dhtHum);
+  drawCenteredAt(d, Y_BLUE_BOT, u8g2_font_6x10_tr, hbuf);
+
+  d.sendBuffer();
+}
+
+static void renderDht()  { renderDhtTo(display); }
+
+// oled2 is on bit-banged SW I2C and its sendBuffer takes ~90 ms. We push that
+// work onto a dedicated task pinned to core 0 so the Arduino loop on core 1
+// stays responsive (button polling, etc.).
+TaskHandle_t oled2TaskHandle = nullptr;
+
+static void oled2Task(void *) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    renderDhtTo(oled2);
+  }
+}
+
+static void renderDht2() {
+  if (oled2TaskHandle) xTaskNotifyGive(oled2TaskHandle);
+}
+
 static void renderCurrent() {
-  if (currentScreen == SCREEN_IP) renderIp();
-  else                            renderScan();
+  switch (currentScreen) {
+    case SCREEN_IP:   renderIp();   break;
+    case SCREEN_SCAN: renderScan(); break;
+    case SCREEN_DHT:  renderDht();  break;
+  }
 }
 
 // ---------- button ----------
 
 static void onShortPress() {
-  currentScreen = (currentScreen == SCREEN_IP) ? SCREEN_SCAN : SCREEN_IP;
+  currentScreen = static_cast<Screen>((currentScreen + 1) % 3);
   Serial.printf("[btn] short -> screen %d\n", currentScreen);
   if (currentScreen == SCREEN_SCAN && !scanHasData) {
     runScan();
@@ -237,13 +324,20 @@ static void onShortPress() {
 
 static void onLongPress() {
   Serial.printf("[btn] long press, screen %d\n", currentScreen);
-  if (currentScreen == SCREEN_IP) {
-    if (WiFi.status() != WL_CONNECTED) connectWifi(15000);
-    refreshIp();
-    renderIp();
-  } else {
-    runScan();
-    renderScan();
+  switch (currentScreen) {
+    case SCREEN_IP:
+      if (WiFi.status() != WL_CONNECTED) connectWifi(15000);
+      refreshIp();
+      renderIp();
+      break;
+    case SCREEN_SCAN:
+      runScan();
+      renderScan();
+      break;
+    case SCREEN_DHT:
+      readDht();
+      renderDht();
+      break;
   }
 }
 
@@ -280,6 +374,12 @@ void setup() {
   pinMode(BTN_BOOT, INPUT_PULLUP);
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin();
+  oled2.begin();
+  oled2.getU8g2()->tile_buf_ptr = oled2Buf;
+  dht.setup(DHT_PIN, DHTesp::DHT11);
+
+  xTaskCreatePinnedToCore(oled2Task, "oled2", 4096, nullptr, 1,
+                          &oled2TaskHandle, /*core=*/0);
 
   if (!connectWifi(20000)) {
     drawTwoLine("WiFi failed", WIFI_SSID);
@@ -291,6 +391,8 @@ void setup() {
 }
 
 void loop() {
+  uint32_t iterStartUs = micros();
+
   pollButton();
 
   uint32_t now = millis();
@@ -305,6 +407,30 @@ void loop() {
     scanPage = (scanPage + 1) % totalPages;
     lastScanFlip = now;
     renderScan();
+  }
+
+  if (now - lastDhtRead >= DHT_POLL_MS) {
+    readDht();
+    if (currentScreen == SCREEN_DHT) renderDht();
+    renderDht2();
+  }
+
+  busyAccumUs += micros() - iterStartUs;
+
+  if (now - statsWindowAt >= STATS_WINDOW_MS) {
+    uint32_t winMs = now - statsWindowAt;
+    // cpuPct = busyUs * 100 / (winMs * 1000) = busyUs / (winMs * 10)
+    uint32_t pct = (uint32_t)(busyAccumUs / (winMs * 10ULL));
+    cpuPct = pct > 100 ? 100 : (uint8_t)pct;
+    busyAccumUs = 0;
+    statsWindowAt = now;
+
+    uint32_t total = ESP.getHeapSize();
+    uint32_t freeb = ESP.getFreeHeap();
+    ramPct = total ? (uint8_t)(((uint64_t)(total - freeb) * 100) / total) : 0;
+
+    renderCurrent();
+    renderDht2();
   }
 
   delay(10);
