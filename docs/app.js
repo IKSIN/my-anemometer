@@ -114,6 +114,12 @@ const state = {
 
   manualPairs: [],                  // [{ hz, vMps, unitEntered }]
   manualEntryUnit: 'kn',            // current unit for new pair entry
+
+  ble: {
+    reconnecting: false,
+    reconnectTimer: null,
+    userDisconnected: false,
+  },
 };
 
 // ---------- IndexedDB ----------
@@ -162,6 +168,29 @@ async function dbDeleteSession(id) {
 }
 
 // ---------- BLE ----------
+
+function saveLastBleName(name) {
+  try { localStorage.setItem('anemoBleName', name || ''); } catch (_) {}
+}
+function loadLastBleName() {
+  try { return localStorage.getItem('anemoBleName') || ''; } catch (_) { return ''; }
+}
+
+async function attachCharacteristics(server) {
+  const svc = await server.getPrimaryService(BLE_SERVICE_UUID);
+  const ch  = await svc.getCharacteristic(BLE_TELEMETRY_CHAR_UUID);
+  state.bleChar = ch;
+  await ch.startNotifications();
+  ch.addEventListener('characteristicvaluechanged', onBleNotify);
+
+  const cfg = await svc.getCharacteristic(BLE_CONFIG_CHAR_UUID);
+  state.bleConfigChar = cfg;
+  cfg.addEventListener('characteristicvaluechanged', onConfigNotify);
+  await cfg.startNotifications();
+  const initial = await cfg.readValue();
+  handleConfigBytes(initial);
+}
+
 async function bleConnect() {
   showError('');
   if (!navigator.bluetooth) {
@@ -169,28 +198,33 @@ async function bleConnect() {
     return;
   }
   try {
-    const dev = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [BLE_SERVICE_UUID] }],
-    });
+    const saved = loadLastBleName();
+    let dev;
+    try {
+      const filter = { services: [BLE_SERVICE_UUID] };
+      if (saved) filter.name = saved;
+      dev = await navigator.bluetooth.requestDevice({ filters: [filter] });
+    } catch (err) {
+      // Saved name no longer matches a nearby device — fall back to service-only filter.
+      if (saved && err && (err.name === 'NotFoundError' || err.name === 'SecurityError')) {
+        dev = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [BLE_SERVICE_UUID] }],
+        });
+      } else {
+        throw err;
+      }
+    }
     state.bleDevice = dev;
+    state.ble.userDisconnected = false;
     dev.addEventListener('gattserverdisconnected', onBleDisconnected);
     setBleState('connecting');
     const srv = await dev.gatt.connect();
-    const svc = await srv.getPrimaryService(BLE_SERVICE_UUID);
-    const ch  = await svc.getCharacteristic(BLE_TELEMETRY_CHAR_UUID);
-    state.bleChar = ch;
-    await ch.startNotifications();
-    ch.addEventListener('characteristicvaluechanged', onBleNotify);
-
-    const cfg = await svc.getCharacteristic(BLE_CONFIG_CHAR_UUID);
-    state.bleConfigChar = cfg;
-    cfg.addEventListener('characteristicvaluechanged', onConfigNotify);
-    await cfg.startNotifications();
-    const initial = await cfg.readValue();
-    handleConfigBytes(initial);
+    await attachCharacteristics(srv);
 
     state.bleConnected = true;
     setBleState('connected: ' + (dev.name || dev.id));
+    saveLastBleName(dev.name || '');
+    if (dev.name) els.connect.textContent = `Reconnect to ${dev.name}`;
     els.connect.disabled = true;
     els.disconnect.disabled = false;
     setDeviceControlsEnabled(true);
@@ -201,10 +235,44 @@ async function bleConnect() {
 }
 
 function bleDisconnect() {
+  state.ble.userDisconnected = true;
+  if (state.ble.reconnectTimer) {
+    clearTimeout(state.ble.reconnectTimer);
+    state.ble.reconnectTimer = null;
+  }
+  state.ble.reconnecting = false;
   if (state.bleDevice && state.bleDevice.gatt.connected) {
     state.bleDevice.gatt.disconnect();
   }
   onBleDisconnected();
+}
+
+function scheduleReconnect() {
+  if (state.ble.reconnectTimer) return;
+  if (state.ble.userDisconnected || !state.bleDevice) return;
+  state.ble.reconnecting = true;
+  setBleState('auto-reconnecting…');
+
+  const tryOnce = async () => {
+    state.ble.reconnectTimer = null;
+    if (state.ble.userDisconnected || !state.bleDevice) {
+      state.ble.reconnecting = false;
+      return;
+    }
+    try {
+      const srv = await state.bleDevice.gatt.connect();
+      await attachCharacteristics(srv);
+      state.bleConnected = true;
+      setBleState('connected: ' + (state.bleDevice.name || ''));
+      els.connect.disabled = true;
+      els.disconnect.disabled = false;
+      setDeviceControlsEnabled(true);
+      state.ble.reconnecting = false;
+    } catch (_) {
+      state.ble.reconnectTimer = setTimeout(tryOnce, 2500);
+    }
+  };
+  state.ble.reconnectTimer = setTimeout(tryOnce, 1500);
 }
 
 function onBleDisconnected() {
@@ -212,11 +280,15 @@ function onBleDisconnected() {
   state.bleChar = null;
   state.bleConfigChar = null;
   state.deviceConfig = { k: null, b: null, unit: null };
-  setBleState('disconnected');
   els.connect.disabled = false;
   els.disconnect.disabled = true;
   setDeviceControlsEnabled(false);
   renderDeviceReadout();
+  if (!state.ble.userDisconnected && state.bleDevice) {
+    scheduleReconnect();
+  } else {
+    setBleState('disconnected');
+  }
 }
 
 function onConfigNotify(e) {
@@ -1097,5 +1169,9 @@ if ('serviceWorker' in navigator) {
     els.monPreviewK.value = savedK;
     setPreviewK(savedK);
   }
+
+  // BLE button label reflects the last paired device, if any.
+  const lastName = loadLastBleName();
+  if (lastName) els.connect.textContent = `Reconnect to ${lastName}`;
 }
 refreshSessions().then(rerenderFitAndChart);
