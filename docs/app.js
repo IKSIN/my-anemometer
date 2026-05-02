@@ -1,5 +1,9 @@
 'use strict';
 
+// Bumped together with the service worker CACHE name in sw.js so the footer
+// reliably reflects which build is actually running on the user's device.
+const APP_VERSION = 'v8';
+
 // BLE GATT identifiers — must match the firmware in src/main.cpp.
 const BLE_SERVICE_UUID        = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const BLE_TELEMETRY_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
@@ -1150,6 +1154,29 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW reg failed', err));
   });
+}
+
+// ---------- Footer (version + force refresh) ----------
+{
+  const ver = $('app-version');
+  if (ver) ver.textContent = APP_VERSION;
+  const btn = $('app-refresh');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      try {
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(k => caches.delete(k)));
+        }
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map(r => r.unregister()));
+        }
+      } finally {
+        location.reload();
+      }
+    });
+  }
 }
 
 // ---------- Boot ----------
