@@ -47,6 +47,18 @@ const els = {
   manualK: $('manual-k'),
   manualB: $('manual-b'),
   pushManual: $('push-manual'),
+
+  tabBtns: Array.from(document.querySelectorAll('.tab')),
+  views: { monitor: $('view-monitor'), calib: $('view-calib') },
+  monWindUnit: $('mon-wind-unit'),
+  monWindTitle: $('mon-wind-title'),
+  monWindMin: $('mon-wind-min'),
+  monWindAvg: $('mon-wind-avg'),
+  monWindMax: $('mon-wind-max'),
+  monHzMin: $('mon-hz-min'),
+  monHzAvg: $('mon-hz-avg'),
+  monHzMax: $('mon-hz-max'),
+  windowBtns: Array.from(document.querySelectorAll('.window-btn')),
 };
 
 function showError(msg) {
@@ -72,6 +84,12 @@ const state = {
   selectedSessionIds: new Set(),    // for fit/chart
   sessions: [],                     // in-memory mirror of IDB
   lastFit: { noOff: null, withOff: null },
+
+  activeTab: 'monitor',
+  monitor: {
+    samples: [],                    // rolling [{ t, hz, vMps }]
+    windowSec: 60,
+  },
 };
 
 // ---------- IndexedDB ----------
@@ -210,6 +228,8 @@ function renderDeviceReadout() {
     btn.classList.toggle('primary', btn.dataset.unit === c.unit);
   }
   syncManualInputs();
+  // Unit change repaints monitor labels and recomputes wind stats.
+  if (typeof updateMonitor === 'function') updateMonitor();
 }
 
 function syncManualInputs() {
@@ -278,6 +298,7 @@ function onBleNotify(e) {
   state.msLatest = Number(obj.ms || 0);
   updateLive();
   ingestSample(obj);
+  pushMonitorSample(state.hzLatest, Number(obj.v_mps));
 }
 
 function setBleState(text) {
@@ -642,6 +663,179 @@ function exportSelectedCsv() {
   downloadBlob('anemo-selected.csv', 'text/csv', header + rows.join('\n'));
 }
 
+// ---------- Monitor ----------
+const UNIT_LABELS = { kn: 'kn', mps: 'm/s', kmh: 'km/h' };
+const UNIT_SCALE  = { kn: 1.943844, mps: 1, kmh: 3.6 };
+
+function currentUnit() {
+  const u = state.deviceConfig && state.deviceConfig.unit;
+  return UNIT_LABELS[u] ? u : 'kn';
+}
+
+function mpsTo(unit, v) {
+  return v * (UNIT_SCALE[unit] ?? UNIT_SCALE.kn);
+}
+
+let chartWind = null;
+let chartHz = null;
+
+function initMonitorCharts() {
+  if (chartWind) return;
+  const common = {
+    type: 'line',
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      scales: {
+        x: {
+          type: 'linear',
+          title: { display: true, text: 'seconds ago' },
+          grid: { color: '#2a2f3a' },
+          ticks: { color: '#8b94a3' },
+          reverse: true,
+          min: -60, max: 0,
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: '#2a2f3a' },
+          ticks: { color: '#8b94a3' },
+        },
+      },
+      plugins: { legend: { display: false } },
+      elements: { point: { radius: 0 }, line: { borderWidth: 2, tension: 0.2 } },
+    },
+  };
+  const wctx = $('chart-wind').getContext('2d');
+  chartWind = new Chart(wctx, {
+    ...common,
+    data: { datasets: [{ label: 'wind', data: [], borderColor: '#7cd4fd' }] },
+    options: {
+      ...common.options,
+      scales: {
+        ...common.options.scales,
+        y: { ...common.options.scales.y, title: { display: true, text: UNIT_LABELS[currentUnit()] } },
+      },
+    },
+  });
+  const hctx = $('chart-hz').getContext('2d');
+  chartHz = new Chart(hctx, {
+    ...common,
+    data: { datasets: [{ label: 'hz', data: [], borderColor: '#f7b955' }] },
+    options: {
+      ...common.options,
+      scales: {
+        ...common.options.scales,
+        y: { ...common.options.scales.y, title: { display: true, text: 'Hz' } },
+      },
+    },
+  });
+}
+
+function pushMonitorSample(hz, vMps) {
+  if (hz == null || !isFinite(hz)) return;
+  const t = performance.now();
+  const samples = state.monitor.samples;
+  samples.push({ t, hz, vMps: isFinite(vMps) ? vMps : 0 });
+  // trim to current window
+  const cutoff = t - state.monitor.windowSec * 1000;
+  let i = 0;
+  while (i < samples.length && samples[i].t < cutoff) i++;
+  if (i > 0) samples.splice(0, i);
+  if (state.activeTab === 'monitor') updateMonitor();
+}
+
+function updateMonitor() {
+  initMonitorCharts();
+  const samples = state.monitor.samples;
+  const u = currentUnit();
+  const unitLabel = UNIT_LABELS[u];
+  els.monWindUnit.textContent = `(${unitLabel})`;
+  els.monWindTitle.textContent = `Wind (${unitLabel})`;
+  // chart Y axis title
+  if (chartWind) {
+    chartWind.options.scales.y.title.text = unitLabel;
+  }
+
+  if (!samples.length) {
+    setText(els.monWindMin, '—'); setText(els.monWindAvg, '—'); setText(els.monWindMax, '—');
+    setText(els.monHzMin,   '—'); setText(els.monHzAvg,   '—'); setText(els.monHzMax,   '—');
+    if (chartWind) { chartWind.data.datasets[0].data = []; chartWind.update('none'); }
+    if (chartHz)   { chartHz.data.datasets[0].data = [];   chartHz.update('none'); }
+    return;
+  }
+
+  // Stats
+  let hzMin = Infinity, hzMax = -Infinity, hzSum = 0;
+  let vMin = Infinity, vMax = -Infinity, vSum = 0;
+  for (const s of samples) {
+    if (s.hz < hzMin) hzMin = s.hz;
+    if (s.hz > hzMax) hzMax = s.hz;
+    hzSum += s.hz;
+    const v = mpsTo(u, s.vMps);
+    if (v < vMin) vMin = v;
+    if (v > vMax) vMax = v;
+    vSum += v;
+  }
+  const n = samples.length;
+  setText(els.monHzMin, hzMin.toFixed(1));
+  setText(els.monHzAvg, (hzSum / n).toFixed(1));
+  setText(els.monHzMax, hzMax.toFixed(1));
+  setText(els.monWindMin, vMin.toFixed(1));
+  setText(els.monWindAvg, (vSum / n).toFixed(1));
+  setText(els.monWindMax, vMax.toFixed(1));
+
+  // Charts: x = relative seconds (negative = older)
+  const now = performance.now();
+  const windData = samples.map(s => ({ x: (s.t - now) / 1000, y: mpsTo(u, s.vMps) }));
+  const hzData   = samples.map(s => ({ x: (s.t - now) / 1000, y: s.hz }));
+  if (chartWind) {
+    chartWind.data.datasets[0].data = windData;
+    chartWind.options.scales.x.min = -state.monitor.windowSec;
+    chartWind.options.scales.x.max = 0;
+    chartWind.update('none');
+  }
+  if (chartHz) {
+    chartHz.data.datasets[0].data = hzData;
+    chartHz.options.scales.x.min = -state.monitor.windowSec;
+    chartHz.options.scales.x.max = 0;
+    chartHz.update('none');
+  }
+}
+
+function setText(el, t) { if (el) el.textContent = t; }
+
+function setActiveTab(name) {
+  if (!els.views[name]) name = 'monitor';
+  state.activeTab = name;
+  for (const btn of els.tabBtns) {
+    btn.classList.toggle('active', btn.dataset.tab === name);
+  }
+  for (const [key, view] of Object.entries(els.views)) {
+    view.classList.toggle('active', key === name);
+  }
+  try { localStorage.setItem('anemoTab', name); } catch (_) {}
+  if (name === 'monitor') {
+    initMonitorCharts();
+    updateMonitor();
+  }
+}
+
+function setMonitorWindow(sec) {
+  state.monitor.windowSec = sec;
+  // re-trim
+  const cutoff = performance.now() - sec * 1000;
+  const samples = state.monitor.samples;
+  let i = 0;
+  while (i < samples.length && samples[i].t < cutoff) i++;
+  if (i > 0) samples.splice(0, i);
+  for (const btn of els.windowBtns) {
+    btn.classList.toggle('active', Number(btn.dataset.win) === sec);
+  }
+  if (state.activeTab === 'monitor') updateMonitor();
+}
+
 // ---------- Wire up ----------
 els.connect.addEventListener('click', bleConnect);
 els.disconnect.addEventListener('click', bleDisconnect);
@@ -669,6 +863,13 @@ for (const btn of els.unitBtns) {
 }
 els.pushManual.addEventListener('click', pushManual);
 
+for (const btn of els.tabBtns) {
+  btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
+}
+for (const btn of els.windowBtns) {
+  btn.addEventListener('click', () => setMonitorWindow(Number(btn.dataset.win)));
+}
+
 function round4(x) { return Math.round(x * 10000) / 10000; }
 
 // ---------- Service worker ----------
@@ -679,4 +880,10 @@ if ('serviceWorker' in navigator) {
 }
 
 // ---------- Boot ----------
+{
+  let saved = 'monitor';
+  try { saved = localStorage.getItem('anemoTab') || 'monitor'; } catch (_) {}
+  setActiveTab(saved);
+  setMonitorWindow(state.monitor.windowSec);
+}
 refreshSessions().then(rerenderFitAndChart);

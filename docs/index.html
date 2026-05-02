@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Anemo Calib</title>
+  <title>Anemo</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <meta name="theme-color" content="#0f1115">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="Anemo Calib">
+  <meta name="apple-mobile-web-app-title" content="Anemo">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<h1>Anemo Calib</h1>
+<h1>Anemo</h1>
 
 <section class="panel">
   <h2>Connection</h2>
@@ -29,80 +29,129 @@
   <div id="error" class="error"></div>
 </section>
 
-<section class="panel">
-  <h2>Live</h2>
-  <div class="grid2">
-    <div class="live"><div class="label">Hz</div><div id="live-hz" class="value">—</div><div id="live-rpm" class="sub">— RPM</div></div>
-    <div class="live"><div class="label">GPS speed</div><div id="live-kmh" class="value">—</div><div id="live-mps" class="sub">— m/s · acc — m</div></div>
-  </div>
+<nav class="tabs">
+  <button class="tab" data-tab="monitor">Monitor</button>
+  <button class="tab" data-tab="calib">Calibration</button>
+</nav>
+
+<!-- ========== MONITOR VIEW ========== -->
+<section class="view" id="view-monitor">
+
+  <section class="panel">
+    <h2>Stats</h2>
+    <div class="stats-grid">
+      <div class="stats-row">
+        <span class="stats-label">Wind <span id="mon-wind-unit" class="muted">(kn)</span></span>
+        <span class="stats-cell"><span class="muted">min</span> <span id="mon-wind-min">—</span></span>
+        <span class="stats-cell"><span class="muted">avg</span> <span id="mon-wind-avg">—</span></span>
+        <span class="stats-cell"><span class="muted">max</span> <span id="mon-wind-max">—</span></span>
+      </div>
+      <div class="stats-row">
+        <span class="stats-label">Hz</span>
+        <span class="stats-cell"><span class="muted">min</span> <span id="mon-hz-min">—</span></span>
+        <span class="stats-cell"><span class="muted">avg</span> <span id="mon-hz-avg">—</span></span>
+        <span class="stats-cell"><span class="muted">max</span> <span id="mon-hz-max">—</span></span>
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="status">Window:</span>
+      <button class="window-btn" data-win="30">30s</button>
+      <button class="window-btn" data-win="60">60s</button>
+      <button class="window-btn" data-win="300">5min</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2 id="mon-wind-title">Wind</h2>
+    <div class="chart-wrap"><canvas id="chart-wind"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <h2>Hz</h2>
+    <div class="chart-wrap"><canvas id="chart-hz"></canvas></div>
+  </section>
+
 </section>
 
-<section class="panel">
-  <h2>Session</h2>
-  <div class="row" style="margin-bottom:8px">
-    <input id="session-name" type="text" placeholder="e.g. scooter-2026-04-30" autocomplete="off">
-  </div>
-  <div class="row">
-    <button id="btn-session-start" class="primary">Start session</button>
-    <button id="btn-session-stop" class="danger" disabled>Stop session</button>
-    <span id="session-info" class="status">no session</span>
-  </div>
-</section>
+<!-- ========== CALIBRATION VIEW ========== -->
+<section class="view" id="view-calib">
 
-<section class="panel">
-  <h2>Calibration</h2>
-  <div id="fit-empty" class="status">Select sessions below to compute fit.</div>
-  <table class="fit-table" id="fit-table" hidden>
-    <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th><th>push</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>v = k·f</td>
-        <td id="fit1-k">—</td>
-        <td>0</td>
-        <td id="fit1-r">—</td>
-        <td><button id="push-fit1" class="primary" disabled>→</button></td>
-      </tr>
-      <tr>
-        <td>v = k·f + b</td>
-        <td id="fit2-k">—</td>
-        <td id="fit2-b">—</td>
-        <td id="fit2-r">—</td>
-        <td><button id="push-fit2" class="primary" disabled>→</button></td>
-      </tr>
-    </tbody>
-  </table>
-</section>
+  <section class="panel">
+    <h2>Live</h2>
+    <div class="grid2">
+      <div class="live"><div class="label">Hz</div><div id="live-hz" class="value">—</div><div id="live-rpm" class="sub">— RPM</div></div>
+      <div class="live"><div class="label">GPS speed</div><div id="live-kmh" class="value">—</div><div id="live-mps" class="sub">— m/s · acc — m</div></div>
+    </div>
+  </section>
 
-<section class="panel">
-  <h2>Device</h2>
-  <div id="dev-readout" class="status" style="margin-bottom:10px">device config: not connected</div>
-  <div class="row" style="margin-bottom:8px">
-    <span class="status">Display unit:</span>
-    <button class="unit-btn" data-unit="kn" disabled>knots</button>
-    <button class="unit-btn" data-unit="mps" disabled>m/s</button>
-    <button class="unit-btn" data-unit="kmh" disabled>km/h</button>
-  </div>
-  <div class="row" style="margin-bottom:6px;gap:6px">
-    <span class="status" style="min-width:54px">Manual:</span>
-    <input id="manual-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" style="max-width:130px">
-    <input id="manual-b" type="number" step="0.01"   placeholder="b (m/s)"    inputmode="decimal" style="max-width:110px">
-    <button id="push-manual" class="primary" disabled>Push</button>
-  </div>
-  <div class="status">Tap a unit to push it. Coefficients can be pushed via the arrows in the table above, or entered manually here.</div>
-</section>
+  <section class="panel">
+    <h2>Session</h2>
+    <div class="row" style="margin-bottom:8px">
+      <input id="session-name" type="text" placeholder="e.g. scooter-2026-04-30" autocomplete="off">
+    </div>
+    <div class="row">
+      <button id="btn-session-start" class="primary">Start session</button>
+      <button id="btn-session-stop" class="danger" disabled>Stop session</button>
+      <span id="session-info" class="status">no session</span>
+    </div>
+  </section>
 
-<section class="panel">
-  <h2>Chart (Hz vs m/s)</h2>
-  <div id="chart-wrap"><canvas id="chart"></canvas></div>
-</section>
+  <section class="panel">
+    <h2>Calibration</h2>
+    <div id="fit-empty" class="status">Select sessions below to compute fit.</div>
+    <table class="fit-table" id="fit-table" hidden>
+      <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th><th>push</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>v = k·f</td>
+          <td id="fit1-k">—</td>
+          <td>0</td>
+          <td id="fit1-r">—</td>
+          <td><button id="push-fit1" class="primary" disabled>→</button></td>
+        </tr>
+        <tr>
+          <td>v = k·f + b</td>
+          <td id="fit2-k">—</td>
+          <td id="fit2-b">—</td>
+          <td id="fit2-r">—</td>
+          <td><button id="push-fit2" class="primary" disabled>→</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
 
-<section class="panel">
-  <h2>Sessions</h2>
-  <div id="sessions-list"><div class="status">no recordings yet</div></div>
-  <div class="row" style="margin-top:8px">
-    <button id="btn-export-json">Export JSON</button>
-    <button id="btn-export-csv">Export CSV</button>
-  </div>
+  <section class="panel">
+    <h2>Device</h2>
+    <div id="dev-readout" class="status" style="margin-bottom:10px">device config: not connected</div>
+    <div class="row" style="margin-bottom:8px">
+      <span class="status">Display unit:</span>
+      <button class="unit-btn" data-unit="kn" disabled>knots</button>
+      <button class="unit-btn" data-unit="mps" disabled>m/s</button>
+      <button class="unit-btn" data-unit="kmh" disabled>km/h</button>
+    </div>
+    <div class="row" style="margin-bottom:6px;gap:6px">
+      <span class="status" style="min-width:54px">Manual:</span>
+      <input id="manual-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" style="max-width:130px">
+      <input id="manual-b" type="number" step="0.01"   placeholder="b (m/s)"    inputmode="decimal" style="max-width:110px">
+      <button id="push-manual" class="primary" disabled>Push</button>
+    </div>
+    <div class="status">Tap a unit to push it. Coefficients can be pushed via the arrows in the table above, or entered manually here.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Chart (Hz vs m/s)</h2>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <h2>Sessions</h2>
+    <div id="sessions-list"><div class="status">no recordings yet</div></div>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-export-json">Export JSON</button>
+      <button id="btn-export-csv">Export CSV</button>
+    </div>
+  </section>
+
 </section>
 
 <script src="lib/chart.umd.min.js"></script>

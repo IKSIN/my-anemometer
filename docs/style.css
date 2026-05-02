@@ -151,9 +151,73 @@ input[type=text] {
 .session-row .actions { display: flex; gap: 4px; }
 .session-row .actions button { padding: 6px 10px; font-size: 13px; }
 
-#chart-wrap {
+#chart-wrap, .chart-wrap {
   position: relative;
   height: 320px;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+.tab {
+  flex: 1;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 0;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.tab.active {
+  background: var(--accent);
+  color: #0a0d12;
+  border-color: transparent;
+}
+
+.view { display: none; }
+.view.active { display: block; }
+
+/* Monitor stats */
+.muted { color: var(--muted); font-weight: 400; }
+.stats-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stats-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 10px;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.stats-row:last-child { border-bottom: 0; }
+.stats-label {
+  font-weight: 600;
+}
+.stats-cell {
+  font-size: 15px;
+  white-space: nowrap;
+}
+.stats-cell .muted { font-size: 12px; margin-right: 4px; }
+
+.window-btn {
+  padding: 6px 12px;
+  font-size: 14px;
+}
+.window-btn.active {
+  background: var(--accent);
+  color: #0a0d12;
+  border-color: transparent;
 }
 
 .error {
