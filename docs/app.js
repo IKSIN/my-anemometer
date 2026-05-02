@@ -72,6 +72,12 @@ const els = {
   monHzMin: $('mon-hz-min'),
   monHzAvg: $('mon-hz-avg'),
   monHzMax: $('mon-hz-max'),
+  monCalcUnit: $('mon-calc-unit'),
+  monCalcTitle: $('mon-calc-title'),
+  monCalcMin: $('mon-calc-min'),
+  monCalcAvg: $('mon-calc-avg'),
+  monCalcMax: $('mon-calc-max'),
+  monPreviewK: $('mon-preview-k'),
   windowBtns: Array.from(document.querySelectorAll('.window-btn')),
 };
 
@@ -103,6 +109,7 @@ const state = {
   monitor: {
     samples: [],                    // rolling [{ t, hz, vMps }]
     windowSec: 60,
+    previewK: 0,                    // m/s per Hz, used for "Calc wind" chart
   },
 
   manualPairs: [],                  // [{ hz, vMps, unitEntered }]
@@ -697,6 +704,7 @@ function mpsTo(unit, v) {
 
 let chartWind = null;
 let chartHz = null;
+let chartCalc = null;
 
 function initMonitorCharts() {
   if (chartWind) return;
@@ -750,6 +758,18 @@ function initMonitorCharts() {
       },
     },
   });
+  const cctx = $('chart-calc').getContext('2d');
+  chartCalc = new Chart(cctx, {
+    ...common,
+    data: { datasets: [{ label: 'calc', data: [], borderColor: '#6cd17f' }] },
+    options: {
+      ...common.options,
+      scales: {
+        ...common.options.scales,
+        y: { ...common.options.scales.y, title: { display: true, text: UNIT_LABELS[currentUnit()] } },
+      },
+    },
+  });
 }
 
 function pushMonitorSample(hz, vMps) {
@@ -770,24 +790,31 @@ function updateMonitor() {
   const samples = state.monitor.samples;
   const u = currentUnit();
   const unitLabel = UNIT_LABELS[u];
+  const k = state.monitor.previewK;
   els.monWindUnit.textContent = `(${unitLabel})`;
+  els.monCalcUnit.textContent = `(${unitLabel})`;
   els.monWindTitle.textContent = `Wind (${unitLabel})`;
-  // chart Y axis title
-  if (chartWind) {
-    chartWind.options.scales.y.title.text = unitLabel;
-  }
+  els.monCalcTitle.textContent = k > 0
+    ? `Calc wind (${unitLabel})  ·  k=${k}`
+    : `Calc wind (${unitLabel})  ·  set «Preview k» to enable`;
+  if (chartWind) chartWind.options.scales.y.title.text = unitLabel;
+  if (chartCalc) chartCalc.options.scales.y.title.text = unitLabel;
 
   if (!samples.length) {
     setText(els.monWindMin, '—'); setText(els.monWindAvg, '—'); setText(els.monWindMax, '—');
     setText(els.monHzMin,   '—'); setText(els.monHzAvg,   '—'); setText(els.monHzMax,   '—');
+    setText(els.monCalcMin, '—'); setText(els.monCalcAvg, '—'); setText(els.monCalcMax, '—');
     if (chartWind) { chartWind.data.datasets[0].data = []; chartWind.update('none'); }
     if (chartHz)   { chartHz.data.datasets[0].data = [];   chartHz.update('none'); }
+    if (chartCalc) { chartCalc.data.datasets[0].data = []; chartCalc.update('none'); }
     return;
   }
 
   // Stats
   let hzMin = Infinity, hzMax = -Infinity, hzSum = 0;
   let vMin = Infinity, vMax = -Infinity, vSum = 0;
+  let cMin = Infinity, cMax = -Infinity, cSum = 0;
+  const haveK = isFinite(k) && k > 0;
   for (const s of samples) {
     if (s.hz < hzMin) hzMin = s.hz;
     if (s.hz > hzMax) hzMax = s.hz;
@@ -796,6 +823,12 @@ function updateMonitor() {
     if (v < vMin) vMin = v;
     if (v > vMax) vMax = v;
     vSum += v;
+    if (haveK) {
+      const c = mpsTo(u, k * s.hz);
+      if (c < cMin) cMin = c;
+      if (c > cMax) cMax = c;
+      cSum += c;
+    }
   }
   const n = samples.length;
   setText(els.monHzMin, hzMin.toFixed(1));
@@ -804,22 +837,29 @@ function updateMonitor() {
   setText(els.monWindMin, vMin.toFixed(1));
   setText(els.monWindAvg, (vSum / n).toFixed(1));
   setText(els.monWindMax, vMax.toFixed(1));
+  if (haveK) {
+    setText(els.monCalcMin, cMin.toFixed(1));
+    setText(els.monCalcAvg, (cSum / n).toFixed(1));
+    setText(els.monCalcMax, cMax.toFixed(1));
+  } else {
+    setText(els.monCalcMin, '—');
+    setText(els.monCalcAvg, '—');
+    setText(els.monCalcMax, '—');
+  }
 
   // Charts: x = relative seconds (negative = older)
   const now = performance.now();
   const windData = samples.map(s => ({ x: (s.t - now) / 1000, y: mpsTo(u, s.vMps) }));
   const hzData   = samples.map(s => ({ x: (s.t - now) / 1000, y: s.hz }));
-  if (chartWind) {
-    chartWind.data.datasets[0].data = windData;
-    chartWind.options.scales.x.min = -state.monitor.windowSec;
-    chartWind.options.scales.x.max = 0;
-    chartWind.update('none');
-  }
-  if (chartHz) {
-    chartHz.data.datasets[0].data = hzData;
-    chartHz.options.scales.x.min = -state.monitor.windowSec;
-    chartHz.options.scales.x.max = 0;
-    chartHz.update('none');
+  const calcData = haveK
+    ? samples.map(s => ({ x: (s.t - now) / 1000, y: mpsTo(u, k * s.hz) }))
+    : [];
+  for (const [chart, data] of [[chartWind, windData], [chartHz, hzData], [chartCalc, calcData]]) {
+    if (!chart) continue;
+    chart.data.datasets[0].data = data;
+    chart.options.scales.x.min = -state.monitor.windowSec;
+    chart.options.scales.x.max = 0;
+    chart.update('none');
   }
 }
 
@@ -955,6 +995,13 @@ function setActiveTab(name) {
   }
 }
 
+function setPreviewK(value) {
+  const k = parseFloat(value);
+  state.monitor.previewK = isFinite(k) && k >= 0 ? k : 0;
+  try { localStorage.setItem('anemoPreviewK', String(state.monitor.previewK)); } catch (_) {}
+  if (state.activeTab === 'monitor') updateMonitor();
+}
+
 function setMonitorWindow(sec) {
   state.monitor.windowSec = sec;
   // re-trim
@@ -1002,6 +1049,7 @@ for (const btn of els.tabBtns) {
 for (const btn of els.windowBtns) {
   btn.addEventListener('click', () => setMonitorWindow(Number(btn.dataset.win)));
 }
+els.monPreviewK.addEventListener('input', (e) => setPreviewK(e.target.value));
 
 for (const btn of els.manUnitBtns) {
   btn.addEventListener('click', () => setManualEntryUnit(btn.dataset.unit));
@@ -1041,5 +1089,13 @@ if ('serviceWorker' in navigator) {
   setManualEntryUnit(state.manualEntryUnit);
   loadManualPairs();
   renderManualPanel();
+
+  // restore preview k
+  let savedK = '';
+  try { savedK = localStorage.getItem('anemoPreviewK') || ''; } catch (_) {}
+  if (savedK) {
+    els.monPreviewK.value = savedK;
+    setPreviewK(savedK);
+  }
 }
 refreshSessions().then(rerenderFitAndChart);
