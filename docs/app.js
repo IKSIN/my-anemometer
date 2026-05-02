@@ -48,6 +48,20 @@ const els = {
   manualB: $('manual-b'),
   pushManual: $('push-manual'),
 
+  manPairHz: $('man-pair-hz'),
+  manPairV: $('man-pair-v'),
+  manUnitBtns: Array.from(document.querySelectorAll('.man-unit-btn')),
+  manPairAdd: $('man-pair-add'),
+  manPairsList: $('man-pairs-list'),
+  manFitTable: $('man-fit-table'),
+  manFit1k: $('man-fit1-k'),
+  manFit1r: $('man-fit1-r'),
+  manFit2k: $('man-fit2-k'),
+  manFit2b: $('man-fit2-b'),
+  manFit2r: $('man-fit2-r'),
+  manPushFit1: $('man-push-fit1'),
+  manPushFit2: $('man-push-fit2'),
+
   tabBtns: Array.from(document.querySelectorAll('.tab')),
   views: { monitor: $('view-monitor'), calib: $('view-calib') },
   monWindUnit: $('mon-wind-unit'),
@@ -90,6 +104,9 @@ const state = {
     samples: [],                    // rolling [{ t, hz, vMps }]
     windowSec: 60,
   },
+
+  manualPairs: [],                  // [{ hz, vMps, unitEntered }]
+  manualEntryUnit: 'kn',            // current unit for new pair entry
 };
 
 // ---------- IndexedDB ----------
@@ -230,6 +247,7 @@ function renderDeviceReadout() {
   syncManualInputs();
   // Unit change repaints monitor labels and recomputes wind stats.
   if (typeof updateMonitor === 'function') updateMonitor();
+  if (typeof renderManualPanel === 'function') renderManualPanel();
 }
 
 function syncManualInputs() {
@@ -251,6 +269,7 @@ function setDeviceControlsEnabled(en) {
   els.manualB.disabled = !en;
   // fit push buttons depend additionally on having a non-empty fit; rerenderFitAndChart manages.
   rerenderFitAndChart();
+  if (typeof renderManualPanel === 'function') renderManualPanel();
 }
 
 async function pushManual() {
@@ -806,6 +825,120 @@ function updateMonitor() {
 
 function setText(el, t) { if (el) el.textContent = t; }
 
+// ---------- Manual data points ----------
+
+const MANUAL_LS_KEY = 'anemoManualPairs';
+
+function loadManualPairs() {
+  try {
+    const raw = localStorage.getItem(MANUAL_LS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) state.manualPairs = parsed.filter(p =>
+      p && isFinite(p.hz) && isFinite(p.vMps) && p.hz >= 0 && p.vMps >= 0);
+  } catch (_) {}
+}
+
+function saveManualPairs() {
+  try { localStorage.setItem(MANUAL_LS_KEY, JSON.stringify(state.manualPairs)); } catch (_) {}
+}
+
+function setManualEntryUnit(unit) {
+  if (!UNIT_LABELS[unit]) unit = 'kn';
+  state.manualEntryUnit = unit;
+  for (const btn of els.manUnitBtns) {
+    btn.classList.toggle('primary', btn.dataset.unit === unit);
+  }
+  // adjust the wind input placeholder so user knows which unit they're typing in
+  els.manPairV.placeholder = `wind (${UNIT_LABELS[unit]})`;
+}
+
+function addManualPair() {
+  showError('');
+  const hz = parseFloat(els.manPairHz.value);
+  const v  = parseFloat(els.manPairV.value);
+  if (!isFinite(hz) || hz < 0) { showError('manual: Hz must be a non-negative number'); return; }
+  if (!isFinite(v)  || v  < 0) { showError('manual: wind must be a non-negative number'); return; }
+  const unit = state.manualEntryUnit;
+  const scale = UNIT_SCALE[unit] ?? UNIT_SCALE.kn;
+  const vMps = v / scale;
+  state.manualPairs.push({ hz, vMps, unitEntered: unit });
+  saveManualPairs();
+  els.manPairHz.value = '';
+  els.manPairV.value = '';
+  els.manPairHz.focus();
+  renderManualPanel();
+}
+
+function delManualPair(idx) {
+  state.manualPairs.splice(idx, 1);
+  saveManualPairs();
+  renderManualPanel();
+}
+
+function clearManualPairs() {
+  if (!state.manualPairs.length) return;
+  if (!confirm('Clear all manual pairs?')) return;
+  state.manualPairs = [];
+  saveManualPairs();
+  renderManualPanel();
+}
+
+function renderManualPanel() {
+  // List
+  const pairs = state.manualPairs;
+  if (!pairs.length) {
+    els.manPairsList.innerHTML = '<div class="status">no pairs yet</div>';
+  } else {
+    const u = currentUnit();
+    const label = UNIT_LABELS[u];
+    const rows = pairs.map((p, i) => {
+      const v = mpsTo(u, p.vMps);
+      return `<div class="session-row" style="padding:6px 4px">
+        <div class="meta">
+          <div class="info">f=<b>${p.hz.toFixed(2)} Hz</b> · v=<b>${v.toFixed(2)} ${label}</b>
+          <span class="muted" style="margin-left:6px">(entered as ${UNIT_LABELS[p.unitEntered]})</span></div>
+        </div>
+        <div class="actions">
+          <button class="man-pair-del danger" data-idx="${i}">Del</button>
+        </div>
+      </div>`;
+    }).join('');
+    const clear = `<div class="row" style="margin-top:8px"><button id="man-pairs-clear" class="danger">Clear all</button></div>`;
+    els.manPairsList.innerHTML = rows + clear;
+    els.manPairsList.querySelectorAll('.man-pair-del').forEach(btn => {
+      btn.addEventListener('click', e => delManualPair(Number(e.currentTarget.dataset.idx)));
+    });
+    const clrBtn = $('man-pairs-clear');
+    if (clrBtn) clrBtn.addEventListener('click', clearManualPairs);
+  }
+
+  // Fit
+  const oslPairs = pairs.map(p => ({ hz: p.hz, v: p.vMps }));
+  if (oslPairs.length < 1) {
+    els.manFitTable.hidden = true;
+    els.manPushFit1.disabled = true;
+    els.manPushFit2.disabled = true;
+    state.lastManualFit = { noOff: null, withOff: null };
+    return;
+  }
+  const noOff = fitNoOffset(oslPairs.map(p => ({ hz: p.hz, v: p.v })));
+  const withOff = fitWithOffset(oslPairs.map(p => ({ hz: p.hz, v: p.v })));
+  const r1 = rSquared(oslPairs.map(p => ({ hz: p.hz, v: p.v })), noOff.k, 0);
+  const r2 = rSquared(oslPairs.map(p => ({ hz: p.hz, v: p.v })), withOff.k, withOff.b);
+  els.manFitTable.hidden = false;
+  els.manFit1k.textContent = noOff.k.toFixed(4);
+  els.manFit1r.textContent = oslPairs.length >= 2 ? r1.toFixed(3) : '—';
+  els.manFit2k.textContent = withOff.k.toFixed(4);
+  els.manFit2b.textContent = withOff.b.toFixed(3);
+  els.manFit2r.textContent = oslPairs.length >= 2 ? r2.toFixed(3) : '—';
+  state.lastManualFit = { noOff, withOff };
+  const canPush = state.bleConnected && state.bleConfigChar;
+  els.manPushFit1.disabled = !canPush || !(noOff.k > 0);
+  // require ≥2 distinct points for the offset model to be meaningful
+  els.manPushFit2.disabled = !canPush || !(withOff.k > 0) || oslPairs.length < 2;
+}
+
 function setActiveTab(name) {
   if (!els.views[name]) name = 'monitor';
   state.activeTab = name;
@@ -870,6 +1003,26 @@ for (const btn of els.windowBtns) {
   btn.addEventListener('click', () => setMonitorWindow(Number(btn.dataset.win)));
 }
 
+for (const btn of els.manUnitBtns) {
+  btn.addEventListener('click', () => setManualEntryUnit(btn.dataset.unit));
+}
+els.manPairAdd.addEventListener('click', addManualPair);
+els.manPairHz.addEventListener('keydown', (e) => { if (e.key === 'Enter') els.manPairV.focus(); });
+els.manPairV.addEventListener('keydown', (e) => { if (e.key === 'Enter') addManualPair(); });
+els.manPushFit1.addEventListener('click', () => {
+  if (state.lastManualFit && state.lastManualFit.noOff) {
+    pushConfig({ k: round4(state.lastManualFit.noOff.k), b: 0 });
+  }
+});
+els.manPushFit2.addEventListener('click', () => {
+  if (state.lastManualFit && state.lastManualFit.withOff) {
+    pushConfig({
+      k: round4(state.lastManualFit.withOff.k),
+      b: round4(state.lastManualFit.withOff.b),
+    });
+  }
+});
+
 function round4(x) { return Math.round(x * 10000) / 10000; }
 
 // ---------- Service worker ----------
@@ -885,5 +1038,8 @@ if ('serviceWorker' in navigator) {
   try { saved = localStorage.getItem('anemoTab') || 'monitor'; } catch (_) {}
   setActiveTab(saved);
   setMonitorWindow(state.monitor.windowSec);
+  setManualEntryUnit(state.manualEntryUnit);
+  loadManualPairs();
+  renderManualPanel();
 }
 refreshSessions().then(rerenderFitAndChart);

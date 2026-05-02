@@ -121,6 +121,38 @@
   </section>
 
   <section class="panel">
+    <h2>Manual data</h2>
+    <div class="row" style="gap:6px;margin-bottom:8px">
+      <input id="man-pair-hz" type="number" step="0.1" min="0" placeholder="Hz" inputmode="decimal" style="max-width:90px">
+      <input id="man-pair-v"  type="number" step="0.1" min="0" placeholder="wind" inputmode="decimal" style="max-width:90px">
+      <button class="man-unit-btn" data-unit="kn">kn</button>
+      <button class="man-unit-btn" data-unit="mps">m/s</button>
+      <button class="man-unit-btn" data-unit="kmh">km/h</button>
+      <button id="man-pair-add" class="primary">Add</button>
+    </div>
+    <div id="man-pairs-list"><div class="status">no pairs yet</div></div>
+    <table class="fit-table" id="man-fit-table" hidden style="margin-top:10px">
+      <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th><th>push</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>v = k·f</td>
+          <td id="man-fit1-k">—</td>
+          <td>0</td>
+          <td id="man-fit1-r">—</td>
+          <td><button id="man-push-fit1" class="primary" disabled>→</button></td>
+        </tr>
+        <tr>
+          <td>v = k·f + b</td>
+          <td id="man-fit2-k">—</td>
+          <td id="man-fit2-b">—</td>
+          <td id="man-fit2-r">—</td>
+          <td><button id="man-push-fit2" class="primary" disabled>→</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel">
     <h2>Device</h2>
     <div id="dev-readout" class="status" style="margin-bottom:10px">device config: not connected</div>
     <div class="row" style="margin-bottom:8px">
