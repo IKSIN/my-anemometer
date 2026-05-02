@@ -1,35 +1,34 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <DHTesp.h>
+#include <NimBLEDevice.h>
 
-constexpr int OLED_SDA  = 21;
-constexpr int OLED_SCL  = 22;
-constexpr int OLED2_SDA = 18;
-constexpr int OLED2_SCL = 19;
-constexpr int BTN_BOOT  = 0;    // BOOT button on GPIO0, active LOW
-constexpr int DHT_PIN   = 4;    // DHT11 DATA line
+constexpr int OLED_SDA = 21;
+constexpr int OLED_SCL = 22;
+constexpr int HALL_PIN = 23;   // HW-492 anemometer hall sensor, active LOW
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C oled2(U8G2_R0, /*clock=*/OLED2_SCL,
-                                                   /*data=*/OLED2_SDA, U8X8_PIN_NONE);
 
-// U8g2 _F_ constructors back the framebuffer with a STATIC array shared by all
-// instances of the same display type. With two SSD1306 128x64 instances rendered
-// concurrently from different cores, that shared array races and one display
-// briefly shows the other's content. Give oled2 its own framebuffer.
-static uint8_t oled2Buf[16 * 8 * 8];   // tile_width(16) * 8 * tile_buf_height(8)
+// BLE GATT identifiers. Random 128-bit UUIDs so the PWA filters specifically
+// for our device.
+static const char *BLE_DEVICE_NAME         = "ESP32-Anemo";
+static const char *BLE_SERVICE_UUID        = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+static const char *BLE_TELEMETRY_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 
-constexpr const char *WIFI_SSID = "ARRIS-44F2";
-constexpr const char *WIFI_PASS = "8876A08017ACAD93";
-constexpr const char *IP_URL    = "http://api.ipify.org";
+NimBLECharacteristic *telemetryChar = nullptr;
+volatile bool         bleConnected  = false;
 
-constexpr uint32_t SCAN_PAGE_MS    = 3000;
-constexpr uint32_t LONG_PRESS_MS   = 800;
-constexpr uint32_t DEBOUNCE_MS     = 30;
-constexpr int      SCAN_ROWS_PAGE  = 4;
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *) override {
+    bleConnected = true;
+    Serial.println("[ble] connected");
+  }
+  void onDisconnect(NimBLEServer *) override {
+    bleConnected = false;
+    Serial.println("[ble] disconnected, restarting advertising");
+    NimBLEDevice::startAdvertising();
+  }
+};
 
 // Layout zones for two-color 0.96" SSD1306:
 //   yellow band: y =  0..15  (use baseline ~ y=11 for 6x10 font)
@@ -39,387 +38,123 @@ constexpr int Y_YELLOW   = 11;
 constexpr int Y_BLUE_MID = 46;
 constexpr int Y_BLUE_BOT = 61;
 
-enum Screen { SCREEN_IP, SCREEN_SCAN, SCREEN_DHT };
-Screen currentScreen = SCREEN_IP;
-
-String currentIp;
-
-int     scanCount = 0;
-int     scanPage  = 0;
-uint32_t lastScanFlip = 0;
-bool    scanHasData = false;
-
-DHTesp   dht;
-constexpr uint32_t DHT_POLL_MS = 2000;   // DHT11 min sampling period
-uint32_t lastDhtRead = 0;
-float    dhtTemp = NAN;
-float    dhtHum  = NAN;
-bool     dhtOk   = false;
-
-// CPU / RAM stats sampled in loop()
+// CPU / RAM stats sampled in loop().
 constexpr uint32_t STATS_WINDOW_MS = 1000;
-uint64_t busyAccumUs    = 0;
-uint32_t statsWindowAt  = 0;
-uint8_t  cpuPct         = 0;
-uint8_t  ramPct         = 0;
+uint64_t busyAccumUs   = 0;
+uint32_t statsWindowAt = 0;
+uint8_t  cpuPct        = 0;
+uint8_t  ramPct        = 0;
 
-// button state
-bool     btnPrev = HIGH;
-uint32_t btnDownAt = 0;
-bool     longFired = false;
+// Anemometer: HW-492 hall sensor pulses each time a magnet on the rotor passes
+// the chip. ISR counts edges; the 1 s stats tick samples and clears the counter
+// to compute Hz / RPM.
+volatile uint32_t hallEdgeCount = 0;
+uint32_t windHz10    = 0;   // tenths of Hz, e.g. 23 == 2.3 Hz
+uint32_t windRpm     = 0;
+uint32_t totalPulses = 0;   // cumulative since boot, sent to PWA
 
-static void drawZoneFrames(U8G2 &d) {
-  d.drawFrame(0, 0, 128, 16);
-  d.drawFrame(0, 18, 128, 46);
+static void IRAM_ATTR hallIsr() {
+  hallEdgeCount++;
 }
 
-static void beginFrame(U8G2 &d) {
-  d.clearBuffer();
-  drawZoneFrames(d);
+static void drawZoneFrames() {
+  display.drawFrame(0, 0, 128, 16);
+  display.drawFrame(0, 18, 128, 46);
 }
 
-static void drawHeaderYellow(U8G2 &d, const char *text) {
-  d.setFont(u8g2_font_6x10_tr);
-  int w = d.getStrWidth(text);
-  d.drawStr((128 - w) / 2, Y_YELLOW, text);
+static void beginFrame() {
+  display.clearBuffer();
+  drawZoneFrames();
 }
 
-static void drawHeaderStats(U8G2 &d) {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "CPU %u%%  RAM %u%%", cpuPct, ramPct);
-  drawHeaderYellow(d, buf);
+static void drawHeaderStats() {
+  char buf[28];
+  snprintf(buf, sizeof(buf), "%s CPU %u%%  RAM %u%%",
+           bleConnected ? "BT*" : "BT-",
+           (unsigned)cpuPct, (unsigned)ramPct);
+  display.setFont(u8g2_font_6x10_tr);
+  int w = display.getStrWidth(buf);
+  display.drawStr((128 - w) / 2, Y_YELLOW, buf);
 }
 
-static void drawCenteredAt(U8G2 &d, int y, const uint8_t *font, const char *text) {
-  d.setFont(font);
-  int w = d.getStrWidth(text);
-  d.drawStr((128 - w) / 2, y, text);
+static void drawCenteredAt(int y, const uint8_t *font, const char *text) {
+  display.setFont(font);
+  int w = display.getStrWidth(text);
+  display.drawStr((128 - w) / 2, y, text);
 }
 
-static void drawTwoLine(const char *header, const char *body) {
-  beginFrame(display);
-  drawHeaderYellow(display, header);
-  if (body) drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, body);
-  display.sendBuffer();
-}
+static void renderAnemo() {
+  beginFrame();
+  drawHeaderStats();
 
-// ---------- WiFi / IP ----------
-
-static bool connectWifi(uint32_t timeout_ms) {
-  Serial.printf("Connecting to %s ...\n", WIFI_SSID);
-  drawTwoLine("Connecting...", WIFI_SSID);
-
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_OFF);
-  delay(50);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);
-  delay(100);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < timeout_ms) {
-    delay(250);
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("WiFi failed, status=%d\n", (int)WiFi.status());
-    return false;
-  }
-  Serial.printf("Connected, local IP: %s, RSSI %d\n",
-                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
-  return true;
-}
-
-static String fetchPublicIp() {
-  HTTPClient http;
-  http.setTimeout(8000);
-  http.setUserAgent("esp32-hello/1.0");
-  if (!http.begin(IP_URL)) {
-    Serial.println("http.begin failed");
-    return String();
-  }
-
-  int code = http.GET();
-  Serial.printf("HTTP GET %s -> %d\n", IP_URL, code);
-  String body;
-  if (code == HTTP_CODE_OK) {
-    body = http.getString();
-    body.trim();
-  }
-  http.end();
-  return body;
-}
-
-// ---------- screens ----------
-
-static void renderIp() {
-  beginFrame(display);
-  drawHeaderStats(display);
-
-  if (currentIp.length() == 0) {
-    drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, "fetch failed");
-    display.sendBuffer();
-    return;
-  }
-
+  char rbuf[16];
+  snprintf(rbuf, sizeof(rbuf), "%lu RPM", (unsigned long)windRpm);
   display.setFont(u8g2_font_logisoso16_tr);
-  int w = display.getStrWidth(currentIp.c_str());
-  if (w > 128) {
-    display.setFont(u8g2_font_7x13B_tr);
-    w = display.getStrWidth(currentIp.c_str());
-  }
-  display.drawStr(max(0, (128 - w) / 2), Y_BLUE_MID, currentIp.c_str());
-
-  String ssid = WiFi.SSID();
-  String foot = ssid + " " + String((int)WiFi.RSSI()) + "dBm";
-  display.setFont(u8g2_font_6x10_tr);
-  while (display.getStrWidth(foot.c_str()) > 124 && ssid.length() > 1) {
-    ssid.remove(ssid.length() - 1);
-    foot = ssid + ". " + String((int)WiFi.RSSI()) + "dBm";
-  }
-  drawCenteredAt(display, Y_BLUE_BOT, u8g2_font_6x10_tr, foot.c_str());
-  display.sendBuffer();
-}
-
-static String truncate(const String &s, int maxChars) {
-  if ((int)s.length() <= maxChars) return s;
-  return s.substring(0, maxChars - 1) + ".";
-}
-
-static void renderScan() {
-  beginFrame(display);
-  drawHeaderStats(display);
-
-  if (!scanHasData) {
-    drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, "Scanning...");
-    display.sendBuffer();
-    return;
-  }
-  if (scanCount == 0) {
-    drawCenteredAt(display, Y_BLUE_MID, u8g2_font_6x10_tr, "no networks");
-    display.sendBuffer();
-    return;
-  }
-
-  display.setFont(u8g2_font_6x10_tr);
-  int start = scanPage * SCAN_ROWS_PAGE;
-  int end = min(start + SCAN_ROWS_PAGE, scanCount);
-  for (int i = start; i < end; i++) {
-    int y = 28 + (i - start) * 10;
-    int rssi = WiFi.RSSI(i);
-    bool open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
-    String line = String(rssi);
-    while (line.length() < 4) line = " " + line;
-    line += open ? "  " : " *";
-    line += truncate(WiFi.SSID(i), 14);
-    display.drawStr(3, y, line.c_str());
-  }
-  display.sendBuffer();
-}
-
-static void runScan() {
-  scanHasData = false;
-  scanPage = 0;
-  renderScan();
-
-  WiFi.scanDelete();
-  int n = WiFi.scanNetworks(false, true, false, 500);
-  scanCount = (n >= 0) ? n : 0;
-  scanHasData = true;
-  lastScanFlip = millis();
-  Serial.printf("scanNetworks -> %d\n", n);
-  for (int i = 0; i < scanCount; i++) {
-    Serial.printf("  %2d: %4d dBm  ch%2d  %s  %s\n",
-                  i, WiFi.RSSI(i), WiFi.channel(i),
-                  WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "enc ",
-                  WiFi.SSID(i).c_str());
-  }
-}
-
-static void refreshIp() {
-  drawTwoLine("Fetching IP...", nullptr);
-  currentIp = fetchPublicIp();
-  Serial.printf("Public IP: '%s'\n", currentIp.c_str());
-}
-
-// ---------- DHT ----------
-
-static void readDht() {
-  TempAndHumidity th = dht.getTempAndHumidity();
-  DHTesp::DHT_ERROR_t st = dht.getStatus();
-  lastDhtRead = millis();
-  if (st == DHTesp::ERROR_NONE && !isnan(th.temperature) && !isnan(th.humidity)) {
-    dhtTemp = th.temperature;
-    dhtHum  = th.humidity;
-    dhtOk   = true;
-    Serial.printf("DHT11: %.1f C, %.0f %%\n", dhtTemp, dhtHum);
-  } else {
-    dhtOk = false;
-    Serial.printf("DHT11 read error: %s\n", dht.getStatusString());
-  }
-}
-
-static void renderDhtTo(U8G2 &d) {
-  beginFrame(d);
-  drawHeaderStats(d);
-
-  if (!dhtOk) {
-    drawCenteredAt(d, Y_BLUE_MID, u8g2_font_6x10_tr, "no data");
-    d.sendBuffer();
-    return;
-  }
-
-  char tbuf[16];
-  snprintf(tbuf, sizeof(tbuf), "%.1f\xB0""C", dhtTemp);  // 0xB0 = ° in u8g2 latin-1 fonts
-  d.setFont(u8g2_font_logisoso16_tr);
-  int w = d.getStrWidth(tbuf);
-  d.drawStr(max(0, (128 - w) / 2), Y_BLUE_MID, tbuf);
+  int w = display.getStrWidth(rbuf);
+  display.drawStr(max(0, (128 - w) / 2), Y_BLUE_MID, rbuf);
 
   char hbuf[16];
-  snprintf(hbuf, sizeof(hbuf), "%.0f %%", dhtHum);
-  drawCenteredAt(d, Y_BLUE_BOT, u8g2_font_6x10_tr, hbuf);
+  snprintf(hbuf, sizeof(hbuf), "%lu.%lu Hz",
+           (unsigned long)(windHz10 / 10), (unsigned long)(windHz10 % 10));
+  drawCenteredAt(Y_BLUE_BOT, u8g2_font_6x10_tr, hbuf);
 
-  d.sendBuffer();
+  display.sendBuffer();
 }
 
-static void renderDht()  { renderDhtTo(display); }
+static void bleInit() {
+  NimBLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);   // max TX power for outdoor use
 
-// oled2 is on bit-banged SW I2C and its sendBuffer takes ~90 ms. We push that
-// work onto a dedicated task pinned to core 0 so the Arduino loop on core 1
-// stays responsive (button polling, etc.).
-TaskHandle_t oled2TaskHandle = nullptr;
+  NimBLEServer *srv = NimBLEDevice::createServer();
+  srv->setCallbacks(new ServerCallbacks());
 
-static void oled2Task(void *) {
-  for (;;) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    renderDhtTo(oled2);
-  }
+  NimBLEService *svc = srv->createService(BLE_SERVICE_UUID);
+  telemetryChar = svc->createCharacteristic(
+    BLE_TELEMETRY_CHAR_UUID,
+    NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
+  svc->start();
+
+  NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(BLE_SERVICE_UUID);
+  adv->setScanResponse(true);
+  NimBLEDevice::startAdvertising();
+  Serial.println("[ble] advertising as " + String(BLE_DEVICE_NAME));
 }
 
-static void renderDht2() {
-  if (oled2TaskHandle) xTaskNotifyGive(oled2TaskHandle);
+static void bleNotifyTelemetry(uint32_t windowPulses, uint32_t nowMs) {
+  if (!telemetryChar || !bleConnected) return;
+  char json[96];
+  int n = snprintf(json, sizeof(json),
+    "{\"hz\":%lu.%lu,\"rpm\":%lu,\"pulses\":%lu,\"total\":%lu,\"ms\":%lu}",
+    (unsigned long)(windHz10 / 10), (unsigned long)(windHz10 % 10),
+    (unsigned long)windRpm, (unsigned long)windowPulses,
+    (unsigned long)totalPulses, (unsigned long)nowMs);
+  if (n <= 0) return;
+  telemetryChar->setValue((uint8_t *)json, n);
+  telemetryChar->notify();
 }
-
-static void renderCurrent() {
-  switch (currentScreen) {
-    case SCREEN_IP:   renderIp();   break;
-    case SCREEN_SCAN: renderScan(); break;
-    case SCREEN_DHT:  renderDht();  break;
-  }
-}
-
-// ---------- button ----------
-
-static void onShortPress() {
-  currentScreen = static_cast<Screen>((currentScreen + 1) % 3);
-  Serial.printf("[btn] short -> screen %d\n", currentScreen);
-  if (currentScreen == SCREEN_SCAN && !scanHasData) {
-    runScan();
-  }
-  renderCurrent();
-}
-
-static void onLongPress() {
-  Serial.printf("[btn] long press, screen %d\n", currentScreen);
-  switch (currentScreen) {
-    case SCREEN_IP:
-      if (WiFi.status() != WL_CONNECTED) connectWifi(15000);
-      refreshIp();
-      renderIp();
-      break;
-    case SCREEN_SCAN:
-      runScan();
-      renderScan();
-      break;
-    case SCREEN_DHT:
-      readDht();
-      renderDht();
-      break;
-  }
-}
-
-static void pollButton() {
-  static uint32_t lastEdge = 0;
-  uint32_t now = millis();
-  bool raw = digitalRead(BTN_BOOT);
-
-  if (raw != btnPrev && (now - lastEdge) >= DEBOUNCE_MS) {
-    lastEdge = now;
-    if (raw == LOW) {           // pressed
-      btnDownAt = now;
-      longFired = false;
-    } else {                    // released
-      uint32_t held = now - btnDownAt;
-      if (!longFired && held < LONG_PRESS_MS) onShortPress();
-    }
-    btnPrev = raw;
-  }
-
-  // long-press fires while still held
-  if (btnPrev == LOW && !longFired &&
-      (now - btnDownAt) >= LONG_PRESS_MS) {
-    longFired = true;
-    onLongPress();
-  }
-}
-
-// ---------- arduino ----------
 
 void setup() {
   Serial.begin(115200);
   delay(100);
-  pinMode(BTN_BOOT, INPUT_PULLUP);
+
+  pinMode(HALL_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(HALL_PIN), hallIsr, FALLING);
+
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin();
-  oled2.begin();
-  oled2.getU8g2()->tile_buf_ptr = oled2Buf;
-  dht.setup(DHT_PIN, DHTesp::DHT11);
+  renderAnemo();
 
-  xTaskCreatePinnedToCore(oled2Task, "oled2", 4096, nullptr, 1,
-                          &oled2TaskHandle, /*core=*/0);
-
-  if (!connectWifi(20000)) {
-    drawTwoLine("WiFi failed", WIFI_SSID);
-    return;
-  }
-
-  refreshIp();
-  renderIp();
+  bleInit();
 }
 
 void loop() {
   uint32_t iterStartUs = micros();
-
-  pollButton();
-
   uint32_t now = millis();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWifi(20000);
-  }
-
-  if (currentScreen == SCREEN_SCAN && scanHasData && scanCount > SCAN_ROWS_PAGE &&
-      now - lastScanFlip >= SCAN_PAGE_MS) {
-    int totalPages = (scanCount + SCAN_ROWS_PAGE - 1) / SCAN_ROWS_PAGE;
-    scanPage = (scanPage + 1) % totalPages;
-    lastScanFlip = now;
-    renderScan();
-  }
-
-  if (now - lastDhtRead >= DHT_POLL_MS) {
-    readDht();
-    if (currentScreen == SCREEN_DHT) renderDht();
-    renderDht2();
-  }
-
   busyAccumUs += micros() - iterStartUs;
 
   if (now - statsWindowAt >= STATS_WINDOW_MS) {
     uint32_t winMs = now - statsWindowAt;
-    // cpuPct = busyUs * 100 / (winMs * 1000) = busyUs / (winMs * 10)
     uint32_t pct = (uint32_t)(busyAccumUs / (winMs * 10ULL));
     cpuPct = pct > 100 ? 100 : (uint8_t)pct;
     busyAccumUs = 0;
@@ -429,8 +164,21 @@ void loop() {
     uint32_t freeb = ESP.getFreeHeap();
     ramPct = total ? (uint8_t)(((uint64_t)(total - freeb) * 100) / total) : 0;
 
-    renderCurrent();
-    renderDht2();
+    noInterrupts();
+    uint32_t pulses = hallEdgeCount;
+    hallEdgeCount = 0;
+    interrupts();
+    windHz10 = (uint32_t)((uint64_t)pulses * 10000ULL / winMs);
+    windRpm  = (uint32_t)((uint64_t)pulses * 60000ULL / winMs);
+    totalPulses += pulses;
+
+    Serial.printf("anemo: %lu pulses/%lums -> %lu.%lu Hz, %lu RPM, total %lu\n",
+                  (unsigned long)pulses, (unsigned long)winMs,
+                  (unsigned long)(windHz10 / 10), (unsigned long)(windHz10 % 10),
+                  (unsigned long)windRpm, (unsigned long)totalPulses);
+
+    renderAnemo();
+    bleNotifyTelemetry(pulses, now);
   }
 
   delay(10);

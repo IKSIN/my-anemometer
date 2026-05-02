@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Anemo Calib</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Anemo Calib">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Anemo Calib</h1>
+
+<section class="panel">
+  <h2>Connection</h2>
+  <div class="row" style="margin-bottom:8px">
+    <button id="btn-connect" class="primary">Connect BLE</button>
+    <button id="btn-disconnect" disabled>Disconnect</button>
+    <button id="btn-gps">Start GPS</button>
+  </div>
+  <div class="row">
+    <span class="status"><span id="ble-dot" class="dot"></span> BLE: <span id="ble-state">disconnected</span></span>
+    <span class="status"><span id="gps-dot" class="dot"></span> GPS: <span id="gps-state">off</span></span>
+  </div>
+  <div id="error" class="error"></div>
+</section>
+
+<section class="panel">
+  <h2>Live</h2>
+  <div class="grid2">
+    <div class="live"><div class="label">Hz</div><div id="live-hz" class="value">—</div><div id="live-rpm" class="sub">— RPM</div></div>
+    <div class="live"><div class="label">GPS speed</div><div id="live-kmh" class="value">—</div><div id="live-mps" class="sub">— m/s · acc — m</div></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Session</h2>
+  <div class="row" style="margin-bottom:8px">
+    <input id="session-name" type="text" placeholder="e.g. scooter-2026-04-30" autocomplete="off">
+  </div>
+  <div class="row">
+    <button id="btn-session-start" class="primary">Start session</button>
+    <button id="btn-session-stop" class="danger" disabled>Stop session</button>
+    <span id="session-info" class="status">no session</span>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Calibration</h2>
+  <div id="fit-empty" class="status">Select sessions below to compute fit.</div>
+  <table class="fit-table" id="fit-table" hidden>
+    <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th></tr></thead>
+    <tbody>
+      <tr><td>v = k·f</td><td id="fit1-k">—</td><td>0</td><td id="fit1-r">—</td></tr>
+      <tr><td>v = k·f + b</td><td id="fit2-k">—</td><td id="fit2-b">—</td><td id="fit2-r">—</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Chart (Hz vs m/s)</h2>
+  <div id="chart-wrap"><canvas id="chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <h2>Sessions</h2>
+  <div id="sessions-list"><div class="status">no recordings yet</div></div>
+  <div class="row" style="margin-top:8px">
+    <button id="btn-export-json">Export JSON</button>
+    <button id="btn-export-csv">Export CSV</button>
+  </div>
+</section>
+
+<script src="lib/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
