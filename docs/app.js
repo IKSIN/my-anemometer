@@ -44,6 +44,9 @@ const els = {
   pushFit2: $('push-fit2'),
   devReadout: $('dev-readout'),
   unitBtns: Array.from(document.querySelectorAll('.unit-btn')),
+  manualK: $('manual-k'),
+  manualB: $('manual-b'),
+  pushManual: $('push-manual'),
 };
 
 function showError(msg) {
@@ -206,12 +209,45 @@ function renderDeviceReadout() {
   for (const btn of els.unitBtns) {
     btn.classList.toggle('primary', btn.dataset.unit === c.unit);
   }
+  syncManualInputs();
+}
+
+function syncManualInputs() {
+  // Mirror device values into the manual fields, but never clobber what the
+  // user is currently typing.
+  const c = state.deviceConfig;
+  if (c.k != null && isFinite(c.k) && document.activeElement !== els.manualK) {
+    els.manualK.value = c.k.toFixed(4);
+  }
+  if (c.b != null && isFinite(c.b) && document.activeElement !== els.manualB) {
+    els.manualB.value = c.b.toFixed(3);
+  }
 }
 
 function setDeviceControlsEnabled(en) {
   for (const btn of els.unitBtns) btn.disabled = !en;
-  // push buttons depend additionally on having a non-empty fit; rerenderFitAndChart manages.
+  els.pushManual.disabled = !en;
+  els.manualK.disabled = !en;
+  els.manualB.disabled = !en;
+  // fit push buttons depend additionally on having a non-empty fit; rerenderFitAndChart manages.
   rerenderFitAndChart();
+}
+
+async function pushManual() {
+  const kRaw = els.manualK.value.trim();
+  const bRaw = els.manualB.value.trim();
+  const k = parseFloat(kRaw);
+  if (!isFinite(k)) { showError('manual: k must be a number'); return; }
+  const payload = { k };
+  if (bRaw !== '') {
+    const b = parseFloat(bRaw);
+    if (!isFinite(b)) { showError('manual: b must be a number'); return; }
+    payload.b = b;
+  } else {
+    payload.b = 0;
+  }
+  showError('');
+  await pushConfig(payload);
 }
 
 async function pushConfig(partial) {
@@ -631,6 +667,7 @@ els.pushFit2.addEventListener('click', () => {
 for (const btn of els.unitBtns) {
   btn.addEventListener('click', () => pushConfig({ unit: btn.dataset.unit }));
 }
+els.pushManual.addEventListener('click', pushManual);
 
 function round4(x) { return Math.round(x * 10000) / 10000; }
 

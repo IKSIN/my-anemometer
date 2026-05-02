@@ -76,13 +76,19 @@
 <section class="panel">
   <h2>Device</h2>
   <div id="dev-readout" class="status" style="margin-bottom:10px">device config: not connected</div>
-  <div class="row" style="margin-bottom:6px">
+  <div class="row" style="margin-bottom:8px">
     <span class="status">Display unit:</span>
     <button class="unit-btn" data-unit="kn" disabled>knots</button>
     <button class="unit-btn" data-unit="mps" disabled>m/s</button>
     <button class="unit-btn" data-unit="kmh" disabled>km/h</button>
   </div>
-  <div class="status">Tap a unit to push it to the device. Coefficients are pushed via the arrows in the table above.</div>
+  <div class="row" style="margin-bottom:6px;gap:6px">
+    <span class="status" style="min-width:54px">Manual:</span>
+    <input id="manual-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" style="max-width:130px">
+    <input id="manual-b" type="number" step="0.01"   placeholder="b (m/s)"    inputmode="decimal" style="max-width:110px">
+    <button id="push-manual" class="primary" disabled>Push</button>
+  </div>
+  <div class="status">Tap a unit to push it. Coefficients can be pushed via the arrows in the table above, or entered manually here.</div>
 </section>
 
 <section class="panel">
