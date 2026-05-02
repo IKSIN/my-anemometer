@@ -53,12 +53,36 @@
   <h2>Calibration</h2>
   <div id="fit-empty" class="status">Select sessions below to compute fit.</div>
   <table class="fit-table" id="fit-table" hidden>
-    <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th></tr></thead>
+    <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th><th>push</th></tr></thead>
     <tbody>
-      <tr><td>v = k·f</td><td id="fit1-k">—</td><td>0</td><td id="fit1-r">—</td></tr>
-      <tr><td>v = k·f + b</td><td id="fit2-k">—</td><td id="fit2-b">—</td><td id="fit2-r">—</td></tr>
+      <tr>
+        <td>v = k·f</td>
+        <td id="fit1-k">—</td>
+        <td>0</td>
+        <td id="fit1-r">—</td>
+        <td><button id="push-fit1" class="primary" disabled>→</button></td>
+      </tr>
+      <tr>
+        <td>v = k·f + b</td>
+        <td id="fit2-k">—</td>
+        <td id="fit2-b">—</td>
+        <td id="fit2-r">—</td>
+        <td><button id="push-fit2" class="primary" disabled>→</button></td>
+      </tr>
     </tbody>
   </table>
+</section>
+
+<section class="panel">
+  <h2>Device</h2>
+  <div id="dev-readout" class="status" style="margin-bottom:10px">device config: not connected</div>
+  <div class="row" style="margin-bottom:6px">
+    <span class="status">Display unit:</span>
+    <button class="unit-btn" data-unit="kn" disabled>knots</button>
+    <button class="unit-btn" data-unit="mps" disabled>m/s</button>
+    <button class="unit-btn" data-unit="kmh" disabled>km/h</button>
+  </div>
+  <div class="status">Tap a unit to push it to the device. Coefficients are pushed via the arrows in the table above.</div>
 </section>
 
 <section class="panel">

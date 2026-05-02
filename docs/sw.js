@@ -1,5 +1,5 @@
 // Bump this whenever the asset list changes so the service worker re-caches.
-const CACHE = 'anemo-calib-v1';
+const CACHE = 'anemo-calib-v2';
 const ASSETS = [
   './',
   'index.html',

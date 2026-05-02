@@ -1,8 +1,9 @@
 'use strict';
 
 // BLE GATT identifiers — must match the firmware in src/main.cpp.
-const BLE_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const BLE_SERVICE_UUID        = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const BLE_TELEMETRY_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const BLE_CONFIG_CHAR_UUID    = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 // ---------- DOM helpers ----------
 const $ = (id) => document.getElementById(id);
@@ -38,6 +39,11 @@ const els = {
   sessionsList: $('sessions-list'),
   exportJson: $('btn-export-json'),
   exportCsv: $('btn-export-csv'),
+
+  pushFit1: $('push-fit1'),
+  pushFit2: $('push-fit2'),
+  devReadout: $('dev-readout'),
+  unitBtns: Array.from(document.querySelectorAll('.unit-btn')),
 };
 
 function showError(msg) {
@@ -48,6 +54,8 @@ function showError(msg) {
 const state = {
   bleDevice: null,
   bleChar: null,
+  bleConfigChar: null,
+  deviceConfig: { k: null, b: null, unit: null },
   bleConnected: false,
 
   gpsWatchId: null,
@@ -60,6 +68,7 @@ const state = {
   currentSession: null,             // { name, startedAt, samples: [] }
   selectedSessionIds: new Set(),    // for fit/chart
   sessions: [],                     // in-memory mirror of IDB
+  lastFit: { noOff: null, withOff: null },
 };
 
 // ---------- IndexedDB ----------
@@ -127,10 +136,19 @@ async function bleConnect() {
     state.bleChar = ch;
     await ch.startNotifications();
     ch.addEventListener('characteristicvaluechanged', onBleNotify);
+
+    const cfg = await svc.getCharacteristic(BLE_CONFIG_CHAR_UUID);
+    state.bleConfigChar = cfg;
+    cfg.addEventListener('characteristicvaluechanged', onConfigNotify);
+    await cfg.startNotifications();
+    const initial = await cfg.readValue();
+    handleConfigBytes(initial);
+
     state.bleConnected = true;
     setBleState('connected: ' + (dev.name || dev.id));
     els.connect.disabled = true;
     els.disconnect.disabled = false;
+    setDeviceControlsEnabled(true);
   } catch (e) {
     showError('BLE: ' + e.message);
     setBleState('disconnected');
@@ -147,9 +165,67 @@ function bleDisconnect() {
 function onBleDisconnected() {
   state.bleConnected = false;
   state.bleChar = null;
+  state.bleConfigChar = null;
+  state.deviceConfig = { k: null, b: null, unit: null };
   setBleState('disconnected');
   els.connect.disabled = false;
   els.disconnect.disabled = true;
+  setDeviceControlsEnabled(false);
+  renderDeviceReadout();
+}
+
+function onConfigNotify(e) {
+  handleConfigBytes(e.target.value);
+}
+
+function handleConfigBytes(view) {
+  const txt = new TextDecoder().decode(view);
+  try {
+    const obj = JSON.parse(txt);
+    state.deviceConfig = {
+      k: Number(obj.k),
+      b: Number(obj.b),
+      unit: String(obj.unit),
+    };
+    renderDeviceReadout();
+  } catch (err) {
+    console.warn('bad config payload', txt);
+  }
+}
+
+function renderDeviceReadout() {
+  const c = state.deviceConfig;
+  if (c.k == null) {
+    els.devReadout.textContent = 'device config: not connected';
+  } else if (!isFinite(c.k) || c.k <= 0) {
+    els.devReadout.textContent = `device: uncalibrated · unit ${c.unit}`;
+  } else {
+    els.devReadout.textContent =
+      `device: k=${c.k.toFixed(4)} m/s/Hz · b=${c.b.toFixed(3)} · unit ${c.unit}`;
+  }
+  for (const btn of els.unitBtns) {
+    btn.classList.toggle('primary', btn.dataset.unit === c.unit);
+  }
+}
+
+function setDeviceControlsEnabled(en) {
+  for (const btn of els.unitBtns) btn.disabled = !en;
+  // push buttons depend additionally on having a non-empty fit; rerenderFitAndChart manages.
+  rerenderFitAndChart();
+}
+
+async function pushConfig(partial) {
+  if (!state.bleConfigChar) {
+    showError('BLE not connected');
+    return;
+  }
+  try {
+    const json = JSON.stringify(partial);
+    await state.bleConfigChar.writeValue(new TextEncoder().encode(json));
+    // Device will notify back; we rely on that to update the readout.
+  } catch (e) {
+    showError('config push: ' + e.message);
+  }
 }
 
 function onBleNotify(e) {
@@ -425,6 +501,9 @@ function rerenderFitAndChart() {
     els.fitTable.hidden = true;
     els.fitEmpty.style.display = '';
     els.fitEmpty.textContent = 'Select sessions below (or record one) to compute fit.';
+    els.pushFit1.disabled = true;
+    els.pushFit2.disabled = true;
+    state.lastFit = { noOff: null, withOff: null };
   } else {
     els.fitEmpty.style.display = 'none';
     els.fitTable.hidden = false;
@@ -433,6 +512,10 @@ function rerenderFitAndChart() {
     els.fit2k.textContent = withOff.k.toFixed(4);
     els.fit2b.textContent = withOff.b.toFixed(3);
     els.fit2r.textContent = r2.toFixed(3);
+    state.lastFit = { noOff, withOff };
+    const canPush = state.bleConnected && state.bleConfigChar;
+    els.pushFit1.disabled = !canPush || !(noOff.k > 0);
+    els.pushFit2.disabled = !canPush || !(withOff.k > 0);
   }
 
   ensureChart();
@@ -531,6 +614,25 @@ els.sessionStart.addEventListener('click', sessionStart);
 els.sessionStop.addEventListener('click', sessionStop);
 els.exportJson.addEventListener('click', exportAllJson);
 els.exportCsv.addEventListener('click', exportSelectedCsv);
+
+els.pushFit1.addEventListener('click', () => {
+  if (state.lastFit && state.lastFit.noOff) {
+    pushConfig({ k: round4(state.lastFit.noOff.k), b: 0 });
+  }
+});
+els.pushFit2.addEventListener('click', () => {
+  if (state.lastFit && state.lastFit.withOff) {
+    pushConfig({
+      k: round4(state.lastFit.withOff.k),
+      b: round4(state.lastFit.withOff.b),
+    });
+  }
+});
+for (const btn of els.unitBtns) {
+  btn.addEventListener('click', () => pushConfig({ unit: btn.dataset.unit }));
+}
+
+function round4(x) { return Math.round(x * 10000) / 10000; }
 
 // ---------- Service worker ----------
 if ('serviceWorker' in navigator) {
