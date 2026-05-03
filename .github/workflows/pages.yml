@@ -1,0 +1,83 @@
+name: Deploy Pages (main + previews)
+
+on:
+  push:
+    branches:
+      - main
+      - 'preview_*'
+  delete:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build _site
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+
+          # Prod: docs/ from main → _site/
+          git worktree add /tmp/wt-main origin/main
+          cp -R /tmp/wt-main/docs/. _site/
+          git worktree remove /tmp/wt-main
+
+          # Previews: each preview_* branch → _site/<branch>/
+          for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/preview_*); do
+            branch="${ref#origin/}"
+            echo "::group::Build preview $branch"
+            wt="/tmp/wt-$branch"
+            git worktree add "$wt" "$ref"
+            mkdir -p "_site/$branch"
+            cp -R "$wt/docs/." "_site/$branch/"
+            # Isolate caches/version per branch (caches API is shared per origin)
+            if [ -f "_site/$branch/sw.js" ]; then
+              sed -i "s/'anemo-calib-/'anemo-${branch}-/g" "_site/$branch/sw.js"
+            fi
+            if [ -f "_site/$branch/app.js" ]; then
+              sed -i "s/APP_VERSION = '/APP_VERSION = '${branch}-/g" "_site/$branch/app.js"
+            fi
+            git worktree remove "$wt"
+            echo "::endgroup::"
+          done
+
+          # Index of previews
+          {
+            echo '<!doctype html><meta charset=utf-8><title>Previews</title>'
+            echo '<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem}</style>'
+            echo '<h1>Anemometer · previews</h1>'
+            if compgen -G "_site/preview_*/" > /dev/null; then
+              echo '<ul>'
+              for d in _site/preview_*/; do
+                name=$(basename "$d")
+                echo "<li><a href=\"./$name/\">$name</a></li>"
+              done
+              echo '</ul>'
+            else
+              echo '<p><em>No previews yet.</em></p>'
+            fi
+            echo '<p><a href="./">→ main (production)</a></p>'
+          } > _site/_previews.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
