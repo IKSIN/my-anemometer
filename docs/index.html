@@ -1,41 +1,67 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Anemo</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <meta name="theme-color" content="#0f1115">
+  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Anemo">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
+<header id="conn-bar" role="banner">
+  <span class="conn-pill" id="ble-pill">
+    <span id="ble-dot" class="dot" aria-hidden="true"></span>
+    <span class="conn-pill__label">BLE</span>
+    <span id="ble-state" aria-live="polite">disconnected</span>
+  </span>
+  <span class="conn-pill" id="gps-pill">
+    <span id="gps-dot" class="dot" aria-hidden="true"></span>
+    <span class="conn-pill__label">GPS</span>
+    <span id="gps-state" aria-live="polite">off</span>
+  </span>
+  <span class="conn-pill conn-pill--rec" id="rec-pill" hidden>
+    <span class="dot dot--pulse" aria-hidden="true"></span>
+    <span class="conn-pill__label">REC</span>
+    <span id="rec-elapsed">0:00</span>
+  </span>
+</header>
+
 <h1>Anemo</h1>
 
 <section class="panel">
   <h2>Connection</h2>
-  <div class="row" style="margin-bottom:8px">
+  <div class="row">
     <button id="btn-connect" class="primary">Connect BLE</button>
     <button id="btn-disconnect" disabled>Disconnect</button>
     <button id="btn-gps">Start GPS</button>
   </div>
-  <div class="row">
-    <span class="status"><span id="ble-dot" class="dot"></span> BLE: <span id="ble-state">disconnected</span></span>
-    <span class="status"><span id="gps-dot" class="dot"></span> GPS: <span id="gps-state">off</span></span>
-  </div>
-  <div id="error" class="error"></div>
 </section>
 
-<nav class="tabs">
-  <button class="tab" data-tab="monitor">Monitor</button>
-  <button class="tab" data-tab="calib">Calibration</button>
+<nav class="tabs" role="tablist" aria-label="Views">
+  <button class="tab" id="tab-monitor" data-tab="monitor" role="tab" aria-selected="false" aria-controls="view-monitor">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 13c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/>
+    </svg>
+    <span>Monitor</span>
+  </button>
+  <button class="tab" id="tab-calib" data-tab="calib" role="tab" aria-selected="false" aria-controls="view-calib">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/>
+      <circle cx="12" cy="12" r="5"/>
+      <circle cx="12" cy="12" r="1.2" fill="currentColor"/>
+    </svg>
+    <span>Calibration</span>
+  </button>
 </nav>
 
 <!-- ========== MONITOR VIEW ========== -->
-<section class="view" id="view-monitor">
+<section class="view" id="view-monitor" role="tabpanel" aria-labelledby="tab-monitor">
 
   <section class="panel">
     <h2>Stats</h2>
@@ -67,7 +93,7 @@
     </div>
     <div class="row" style="margin-top:8px;gap:6px">
       <span class="status" style="min-width:auto">Preview k:</span>
-      <input id="mon-preview-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" style="max-width:140px">
+      <input id="mon-preview-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" aria-label="Preview k coefficient in meters per second per Hz" style="max-width:140px">
       <span class="status muted" style="font-size:12px">used for «Calc wind» chart only</span>
     </div>
   </section>
@@ -90,7 +116,7 @@
 </section>
 
 <!-- ========== CALIBRATION VIEW ========== -->
-<section class="view" id="view-calib">
+<section class="view" id="view-calib" role="tabpanel" aria-labelledby="tab-calib">
 
   <section class="panel">
     <h2>Live</h2>
@@ -103,7 +129,7 @@
   <section class="panel">
     <h2>Session</h2>
     <div class="row" style="margin-bottom:8px">
-      <input id="session-name" type="text" placeholder="e.g. scooter-2026-04-30" autocomplete="off">
+      <input id="session-name" type="text" placeholder="e.g. scooter-2026-04-30" autocomplete="off" aria-label="Session name">
     </div>
     <div class="row">
       <button id="btn-session-start" class="primary">Start session</button>
@@ -114,7 +140,7 @@
 
   <section class="panel">
     <h2>Calibration</h2>
-    <div id="fit-empty" class="status">Select sessions below to compute fit.</div>
+    <div id="fit-empty" class="empty-state">Select one or more sessions below to compute a fit.</div>
     <table class="fit-table" id="fit-table" hidden>
       <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th><th>push</th></tr></thead>
       <tbody>
@@ -123,14 +149,14 @@
           <td id="fit1-k">—</td>
           <td>0</td>
           <td id="fit1-r">—</td>
-          <td><button id="push-fit1" class="primary" disabled>→</button></td>
+          <td><button id="push-fit1" class="primary" disabled aria-label="Push k from no-offset fit to device">→</button></td>
         </tr>
         <tr>
           <td>v = k·f + b</td>
           <td id="fit2-k">—</td>
           <td id="fit2-b">—</td>
           <td id="fit2-r">—</td>
-          <td><button id="push-fit2" class="primary" disabled>→</button></td>
+          <td><button id="push-fit2" class="primary" disabled aria-label="Push k and b from offset fit to device">→</button></td>
         </tr>
       </tbody>
     </table>
@@ -139,14 +165,15 @@
   <section class="panel">
     <h2>Manual data</h2>
     <div class="row" style="gap:6px;margin-bottom:8px">
-      <input id="man-pair-hz" type="number" step="0.1" min="0" placeholder="Hz" inputmode="decimal" style="max-width:90px">
-      <input id="man-pair-v"  type="number" step="0.1" min="0" placeholder="wind" inputmode="decimal" style="max-width:90px">
+      <input id="man-pair-hz" type="number" step="0.1" min="0" placeholder="Hz" inputmode="decimal" aria-label="Frequency in Hz" style="max-width:90px">
+      <input id="man-pair-v"  type="number" step="0.1" min="0" placeholder="wind" inputmode="decimal" aria-label="Wind speed in selected unit" style="max-width:90px">
       <button class="man-unit-btn" data-unit="kn">kn</button>
       <button class="man-unit-btn" data-unit="mps">m/s</button>
       <button class="man-unit-btn" data-unit="kmh">km/h</button>
       <button id="man-pair-add" class="primary">Add</button>
     </div>
-    <div id="man-pairs-list"><div class="status">no pairs yet</div></div>
+    <div class="status muted" style="font-size:12px;margin-bottom:8px">Enter measured wind in your selected unit; we convert to m/s internally.</div>
+    <div id="man-pairs-list"><div class="empty-state">No pairs yet. Add (Hz, wind) above to fit a k offline.</div></div>
     <table class="fit-table" id="man-fit-table" hidden style="margin-top:10px">
       <thead><tr><th>model</th><th>k</th><th>b</th><th>R²</th><th>push</th></tr></thead>
       <tbody>
@@ -155,14 +182,14 @@
           <td id="man-fit1-k">—</td>
           <td>0</td>
           <td id="man-fit1-r">—</td>
-          <td><button id="man-push-fit1" class="primary" disabled>→</button></td>
+          <td><button id="man-push-fit1" class="primary" disabled aria-label="Push k from manual no-offset fit to device">→</button></td>
         </tr>
         <tr>
           <td>v = k·f + b</td>
           <td id="man-fit2-k">—</td>
           <td id="man-fit2-b">—</td>
           <td id="man-fit2-r">—</td>
-          <td><button id="man-push-fit2" class="primary" disabled>→</button></td>
+          <td><button id="man-push-fit2" class="primary" disabled aria-label="Push k and b from manual offset fit to device">→</button></td>
         </tr>
       </tbody>
     </table>
@@ -179,8 +206,8 @@
     </div>
     <div class="row" style="margin-bottom:6px;gap:6px">
       <span class="status" style="min-width:54px">Manual:</span>
-      <input id="manual-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" style="max-width:130px">
-      <input id="manual-b" type="number" step="0.01"   placeholder="b (m/s)"    inputmode="decimal" style="max-width:110px">
+      <input id="manual-k" type="number" step="0.0001" placeholder="k (m/s/Hz)" inputmode="decimal" aria-label="Manual k in meters per second per Hz" style="max-width:130px">
+      <input id="manual-b" type="number" step="0.01"   placeholder="b (m/s)"    inputmode="decimal" aria-label="Manual b offset in meters per second" style="max-width:110px">
       <button id="push-manual" class="primary" disabled>Push</button>
     </div>
     <div class="status">Tap a unit to push it. Coefficients can be pushed via the arrows in the table above, or entered manually here.</div>
@@ -193,7 +220,7 @@
 
   <section class="panel">
     <h2>Sessions</h2>
-    <div id="sessions-list"><div class="status">no recordings yet</div></div>
+    <div id="sessions-list"><div class="empty-state">Loading…</div></div>
     <div class="row" style="margin-top:8px">
       <button id="btn-export-json">Export JSON</button>
       <button id="btn-export-csv">Export CSV</button>
@@ -207,6 +234,17 @@
   ·
   <button id="app-refresh" class="link-btn">force refresh</button>
 </footer>
+
+<div id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title">
+  <h3 id="confirm-title">Push to device?</h3>
+  <div id="confirm-body" class="confirm-body"></div>
+  <div class="confirm-actions">
+    <button id="confirm-cancel">Cancel</button>
+    <button id="confirm-ok" class="primary">Push</button>
+  </div>
+</dialog>
 
 <script src="lib/chart.umd.min.js"></script>
 <script src="app.js"></script>
