@@ -2,7 +2,7 @@
 
 // Bumped together with the service worker CACHE name in sw.js so the footer
 // reliably reflects which build is actually running on the user's device.
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 
 // BLE GATT identifiers — must match the firmware in src/main.cpp.
 const BLE_SERVICE_UUID        = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
@@ -20,7 +20,14 @@ const els = {
   bleState: $('ble-state'),
   gpsDot: $('gps-dot'),
   gpsState: $('gps-state'),
-  error: $('error'),
+  blePill: $('ble-pill'),
+  recPill: $('rec-pill'),
+  recElapsed: $('rec-elapsed'),
+  toastRegion: $('toast-region'),
+  confirmDialog: $('confirm-dialog'),
+  confirmBody: $('confirm-body'),
+  confirmCancel: $('confirm-cancel'),
+  confirmOk: $('confirm-ok'),
 
   liveHz: $('live-hz'),
   liveRpm: $('live-rpm'),
@@ -85,8 +92,45 @@ const els = {
   windowBtns: Array.from(document.querySelectorAll('.window-btn')),
 };
 
+// Toast notifications. `kind` is 'error' | 'info' | 'success'.
+function showToast(msg, kind) {
+  if (!msg) return;
+  if (!els.toastRegion) return;
+  const t = document.createElement('div');
+  t.className = `toast toast--${kind || 'info'}`;
+  t.textContent = msg;
+  const ttl = kind === 'error' ? 8000 : 4000;
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    t.classList.add('is-leaving');
+    setTimeout(() => t.remove(), 180);
+  };
+  t.addEventListener('click', dismiss);
+  els.toastRegion.appendChild(t);
+  setTimeout(dismiss, ttl);
+}
+
+// Backwards-compatible wrapper. Empty msg used to clear the red strip — toasts
+// auto-clear themselves, so empty calls are no-ops.
 function showError(msg) {
-  els.error.textContent = msg || '';
+  if (msg) showToast(msg, 'error');
+}
+
+// Tactile feedback. iOS Safari ignores navigator.vibrate, which is fine.
+function buzz(pattern) {
+  if (navigator.vibrate) {
+    try { navigator.vibrate(pattern); } catch (_) {}
+  }
+}
+
+function formatElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}:${String(m % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
 // ---------- State ----------
@@ -124,6 +168,9 @@ const state = {
     reconnectTimer: null,
     userDisconnected: false,
   },
+
+  recTimer: null,
+  firstSessionsLoad: true,
 };
 
 // ---------- IndexedDB ----------
@@ -232,6 +279,7 @@ async function bleConnect() {
     els.connect.disabled = true;
     els.disconnect.disabled = false;
     setDeviceControlsEnabled(true);
+    buzz(15);
   } catch (e) {
     showError('BLE: ' + e.message);
     setBleState('disconnected');
@@ -267,11 +315,12 @@ function scheduleReconnect() {
       const srv = await state.bleDevice.gatt.connect();
       await attachCharacteristics(srv);
       state.bleConnected = true;
+      state.ble.reconnecting = false;
       setBleState('connected: ' + (state.bleDevice.name || ''));
       els.connect.disabled = true;
       els.disconnect.disabled = false;
       setDeviceControlsEnabled(true);
-      state.ble.reconnecting = false;
+      buzz(15);
     } catch (_) {
       state.ble.reconnectTimer = setTimeout(tryOnce, 2500);
     }
@@ -368,8 +417,7 @@ async function pushManual() {
   } else {
     payload.b = 0;
   }
-  showError('');
-  await pushConfig(payload);
+  await confirmAndPush(payload);
 }
 
 async function pushConfig(partial) {
@@ -406,6 +454,10 @@ function onBleNotify(e) {
 function setBleState(text) {
   els.bleState.textContent = text;
   els.bleDot.classList.toggle('on', state.bleConnected);
+  if (els.blePill) {
+    els.blePill.classList.toggle('is-reconnecting',
+      !state.bleConnected && !!state.ble.reconnecting);
+  }
 }
 
 // ---------- GPS ----------
@@ -484,6 +536,26 @@ function ingestSample(obj) {
 }
 
 // ---------- Session controls ----------
+function startRecPill(startedAt) {
+  if (!els.recPill) return;
+  els.recPill.hidden = false;
+  const tick = () => {
+    if (els.recElapsed) els.recElapsed.textContent = formatElapsed(Date.now() - startedAt);
+  };
+  tick();
+  if (state.recTimer) clearInterval(state.recTimer);
+  state.recTimer = setInterval(tick, 1000);
+}
+
+function stopRecPill() {
+  if (state.recTimer) {
+    clearInterval(state.recTimer);
+    state.recTimer = null;
+  }
+  if (els.recPill) els.recPill.hidden = true;
+  if (els.recElapsed) els.recElapsed.textContent = '0:00';
+}
+
 async function sessionStart() {
   if (state.currentSession) return;
   const name = els.sessionName.value.trim() || `session-${new Date().toISOString().slice(0,16)}`;
@@ -496,27 +568,41 @@ async function sessionStart() {
   els.sessionStart.disabled = true;
   els.sessionStop.disabled = false;
   els.sessionInfo.textContent = `recording… 0 samples`;
+  startRecPill(state.currentSession.startedAt);
+  buzz(15);
+  showToast(`Recording started: ${name}`, 'success');
 }
 
 async function sessionStop() {
   if (!state.currentSession) return;
   state.currentSession.endedAt = Date.now();
+  const sampleCount = state.currentSession.samples.length;
   const id = await dbAddSession(state.currentSession);
   state.currentSession = null;
   els.sessionStart.disabled = false;
   els.sessionStop.disabled = true;
   els.sessionInfo.textContent = `saved (id ${id})`;
   els.sessionName.value = '';
+  stopRecPill();
+  buzz([10, 60, 10]);
+  showToast(`Saved session #${id} · ${sampleCount} samples`, 'success');
   await refreshSessions();
   state.selectedSessionIds.add(id);
   rerenderFitAndChart();
 }
 
 // ---------- Sessions list ----------
+function renderSessionsSkeleton() {
+  const row = '<div class="session-row skeleton"><div class="meta"><div class="bar long" style="margin-bottom:6px"></div><div class="bar short"></div></div></div>';
+  els.sessionsList.innerHTML = row + row + row;
+}
+
 async function refreshSessions() {
+  if (state.firstSessionsLoad) renderSessionsSkeleton();
   state.sessions = await dbAllSessions();
+  state.firstSessionsLoad = false;
   if (!state.sessions.length) {
-    els.sessionsList.innerHTML = '<div class="status">no recordings yet</div>';
+    els.sessionsList.innerHTML = '<div class="empty-state">No recordings yet. Connect to BLE and tap «Start session».</div>';
     return;
   }
   els.sessionsList.innerHTML = '';
@@ -659,7 +745,7 @@ function rerenderFitAndChart() {
   if (!pairs.length) {
     els.fitTable.hidden = true;
     els.fitEmpty.style.display = '';
-    els.fitEmpty.textContent = 'Select sessions below (or record one) to compute fit.';
+    els.fitEmpty.textContent = 'Select one or more sessions below to compute a fit.';
     els.pushFit1.disabled = true;
     els.pushFit2.disabled = true;
     state.lastFit = { noOff: null, withOff: null };
@@ -1004,7 +1090,7 @@ function renderManualPanel() {
   // List
   const pairs = state.manualPairs;
   if (!pairs.length) {
-    els.manPairsList.innerHTML = '<div class="status">no pairs yet</div>';
+    els.manPairsList.innerHTML = '<div class="empty-state">No pairs yet. Add (Hz, wind) above to fit a k offline.</div>';
   } else {
     const u = currentUnit();
     const label = UNIT_LABELS[u];
@@ -1059,7 +1145,9 @@ function setActiveTab(name) {
   if (!els.views[name]) name = 'monitor';
   state.activeTab = name;
   for (const btn of els.tabBtns) {
-    btn.classList.toggle('active', btn.dataset.tab === name);
+    const active = btn.dataset.tab === name;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
   }
   for (const [key, view] of Object.entries(els.views)) {
     view.classList.toggle('active', key === name);
@@ -1092,6 +1180,70 @@ function setMonitorWindow(sec) {
   if (state.activeTab === 'monitor') updateMonitor();
 }
 
+// ---------- Push confirmation ----------
+
+function fmtCoeff(v, digits) {
+  if (v == null || !isFinite(v)) return '—';
+  return Number(v).toFixed(digits);
+}
+
+function pctDelta(oldV, newV) {
+  if (oldV == null || !isFinite(oldV) || Math.abs(oldV) < 1e-9) return '';
+  const d = ((newV - oldV) / oldV) * 100;
+  const sign = d >= 0 ? '+' : '−';
+  return `  (${sign}${Math.abs(d).toFixed(d >= 100 ? 0 : 1)}%)`;
+}
+
+// Show the modal and resolve true on confirm, false otherwise.
+function confirmPush(payload) {
+  return new Promise((resolve) => {
+    const dlg = els.confirmDialog;
+    if (!dlg || typeof dlg.showModal !== 'function') {
+      // Fallback: native confirm.
+      const ok = window.confirm(`Push k=${fmtCoeff(payload.k, 4)}, b=${fmtCoeff(payload.b, 3)} to device?`);
+      resolve(ok);
+      return;
+    }
+    const cur = state.deviceConfig || {};
+    const newK = payload.k;
+    const newB = payload.b;
+    const lines = [];
+    if (newK != null) {
+      lines.push(`  k:  ${fmtCoeff(cur.k, 4)}  →  ${fmtCoeff(newK, 4)}${pctDelta(cur.k, newK)}`);
+    }
+    if (newB != null) {
+      lines.push(`  b:  ${fmtCoeff(cur.b, 3)}  →  ${fmtCoeff(newB, 3)}`);
+    }
+    els.confirmBody.textContent = lines.join('\n');
+
+    const onCancel = () => { cleanup(); resolve(false); };
+    const onOk = () => { cleanup(); resolve(true); };
+    const onClose = () => { cleanup(); resolve(false); };
+    function cleanup() {
+      els.confirmCancel.removeEventListener('click', onCancel);
+      els.confirmOk.removeEventListener('click', onOk);
+      dlg.removeEventListener('close', onClose);
+      if (dlg.open) dlg.close();
+    }
+    els.confirmCancel.addEventListener('click', onCancel);
+    els.confirmOk.addEventListener('click', onOk);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+  });
+}
+
+async function confirmAndPush(payload) {
+  if (!state.bleConfigChar) {
+    showError('BLE not connected');
+    return;
+  }
+  const ok = await confirmPush(payload);
+  if (!ok) return;
+  await pushConfig(payload);
+  buzz(15);
+  showToast('Pushed to device', 'success');
+}
+
 // ---------- Wire up ----------
 els.connect.addEventListener('click', bleConnect);
 els.disconnect.addEventListener('click', bleDisconnect);
@@ -1103,12 +1255,12 @@ els.exportCsv.addEventListener('click', exportSelectedCsv);
 
 els.pushFit1.addEventListener('click', () => {
   if (state.lastFit && state.lastFit.noOff) {
-    pushConfig({ k: round4(state.lastFit.noOff.k), b: 0 });
+    confirmAndPush({ k: round4(state.lastFit.noOff.k), b: 0 });
   }
 });
 els.pushFit2.addEventListener('click', () => {
   if (state.lastFit && state.lastFit.withOff) {
-    pushConfig({
+    confirmAndPush({
       k: round4(state.lastFit.withOff.k),
       b: round4(state.lastFit.withOff.b),
     });
@@ -1135,12 +1287,12 @@ els.manPairHz.addEventListener('keydown', (e) => { if (e.key === 'Enter') els.ma
 els.manPairV.addEventListener('keydown', (e) => { if (e.key === 'Enter') addManualPair(); });
 els.manPushFit1.addEventListener('click', () => {
   if (state.lastManualFit && state.lastManualFit.noOff) {
-    pushConfig({ k: round4(state.lastManualFit.noOff.k), b: 0 });
+    confirmAndPush({ k: round4(state.lastManualFit.noOff.k), b: 0 });
   }
 });
 els.manPushFit2.addEventListener('click', () => {
   if (state.lastManualFit && state.lastManualFit.withOff) {
-    pushConfig({
+    confirmAndPush({
       k: round4(state.lastManualFit.withOff.k),
       b: round4(state.lastManualFit.withOff.b),
     });
